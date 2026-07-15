@@ -381,3 +381,22 @@ header::after{content:"";position:absolute;left:0;right:0;bottom:-11px;height:1p
 .active-work-filters button:hover{border-color:#8ca99f;background:#f3f8f6}
 .active-work-filters button.clear-all{border-color:transparent;background:transparent;color:#71817b;font-weight:650}
 @media(max-width:900px){.work-filter-menu{right:auto;left:0;width:min(300px,calc(100vw - 28px))}.toolbar-right{flex-wrap:wrap}.active-work-filters{overflow-x:auto;flex-wrap:nowrap;padding-bottom:3px}.active-work-filters button{flex:0 0 auto}}
+
+/* Mise à jour des états de logement — Front Office */
+.front-hero-actions { display:flex; align-items:center; gap:10px; min-width:0; }
+.front-clean-import { display:inline-flex; align-items:center; justify-content:center; gap:7px; min-height:40px; padding:0 13px; border:1px solid #bfd5cb; border-radius:10px; color:#24664e; background:#f4faf7; font-size:12px; font-weight:750; white-space:nowrap; cursor:pointer; transition:transform .16s ease, box-shadow .16s ease, border-color .16s ease, background .16s ease; }
+.front-clean-import:hover:not(:disabled) { transform:translateY(-1px); border-color:#83b49f; background:#eaf6f0; box-shadow:0 5px 16px rgba(37,91,69,.10); }
+.front-clean-import:disabled { opacity:.55; cursor:not-allowed; }
+.clean-status.clean, .clean-status.propre { border-color:#9fcbb9; color:#277258; background:#eaf7f1; }
+.clean-status.clean strong, .clean-status.propre strong { color:#1d674c; }
+.clean-status.to_be_cleaned, .clean-status.non_propre { border-color:#e4aaa5; color:#a64f48; background:#fff0ef; }
+.clean-status.to_be_cleaned strong, .clean-status.non_propre strong { color:#923f39; }
+.clean-status.in_progress, .clean-status.en_cours { border-color:#a9c9dc; color:#397493; background:#edf7fc; }
+.clean-status.in_progress strong, .clean-status.en_cours strong { color:#326780; }
+.clean-status.postponed { border-color:#c8b7dc; color:#76568f; background:#f6f0fb; }
+.clean-status.postponed strong { color:#68467f; }
+.clean-status.to_be_checked, .clean-status.a_controler { border-color:#e5c986; color:#9a6917; background:#fff8e7; }
+.clean-status.to_be_checked strong, .clean-status.a_controler strong { color:#835810; }
+.clean-status.touch_up { border-color:#e4b8cf; color:#975477; background:#fff2f8; }
+.clean-status.touch_up strong { color:#864568; }
+@media (max-width:1100px){.front-hero{align-items:stretch}.front-hero-actions{flex-wrap:wrap}.front-clean-import{flex:1}.front-search{flex:1 1 280px}}

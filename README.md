@@ -43,3 +43,11 @@ npm run dev
 ## Base Supabase
 
 Les scripts SQL nécessaires sont dans le dossier `supabase`. Exécute uniquement ceux qui n'ont pas encore été appliqués à ta base.
+
+## Mise à jour des logements — Front Office
+
+Dans l’espace Front Office, le bouton **Mettre à jour les logements** lit un fichier Excel contenant au minimum les colonnes `Reservation Number` et `Cleaning Status`.
+
+Le rapprochement se fait uniquement avec le numéro de réservation de la journée active. Cette action ne modifie ni les informations de réservation, ni les coches, notes ou statuts du Back Office.
+
+États reconnus : `CLEAN`, `TO_BE_CLEANED`, `IN_PROGRESS`, `POSTPONED`, `TO_BE_CHECKED`, `CHECKED` et `TOUCH_UP`.

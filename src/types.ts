@@ -32,7 +32,7 @@ export type Reservation = {
   source: 'import' | 'manual'
   call_status: CallStatus | null
   internal_note: string | null
-  clean_status?: 'non_renseigne' | 'propre' | 'a_controler' | 'en_cours' | 'non_propre' | string | null
+  clean_status?: 'non_renseigne' | 'clean' | 'to_be_cleaned' | 'in_progress' | 'postponed' | 'to_be_checked' | 'touch_up' | string | null
   created_at?: string
   updated_at?: string
 }

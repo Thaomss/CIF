@@ -52,6 +52,31 @@ function parseWorkbook(buffer: ArrayBuffer, arrivalDayId: string) {
   })
   return [...unique.values()]
 }
+
+type CleanImportRow = { reservation_number: string, clean_status: string }
+const cleanStatusMap: Record<string, string> = {
+  CLEAN: 'clean',
+  TO_BE_CLEANED: 'to_be_cleaned',
+  IN_PROGRESS: 'in_progress',
+  POSTPONED: 'postponed',
+  TO_BE_CHECKED: 'to_be_checked',
+  CHECKED: 'clean',
+  TOUCH_UP: 'touch_up',
+}
+function parseCleanWorkbook(buffer: ArrayBuffer) {
+  const workbook = XLSX.read(buffer, { type: 'array' })
+  const sheet = workbook.Sheets[workbook.SheetNames[0]]
+  const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: true })
+  const unique = new Map<string, CleanImportRow>()
+  raw.filter((row) => Object.values(row).some(Boolean)).forEach((row) => {
+    const reservationNumber = String(getCell(row, ['Reservation Number', 'Numéro de réservation', 'Numero de reservation'])).trim()
+    const rawStatus = String(getCell(row, ['Cleaning Status', 'Statut nettoyage', 'Etat nettoyage', 'État nettoyage'])).trim().toUpperCase().replace(/[\s-]+/g, '_')
+    if (!reservationNumber || !rawStatus) return
+    const cleanStatus = cleanStatusMap[rawStatus]
+    if (cleanStatus) unique.set(reservationNumber, { reservation_number: reservationNumber, clean_status: cleanStatus })
+  })
+  return [...unique.values()]
+}
 function formatDay(date: string) {
   return new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(`${date}T12:00:00`))
 }
@@ -109,7 +134,10 @@ export default function App() {
   const [importing, setImporting] = useState(false)
   const [error, setError] = useState('')
   const [importSummary, setImportSummary] = useState<{ total: number, added: number, updated: number, missing: number } | null>(null)
+  const [cleanImporting, setCleanImporting] = useState(false)
+  const [cleanImportSummary, setCleanImportSummary] = useState<{ updated: number, notFound: number, ignored: number } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  const cleanFileRef = useRef<HTMLInputElement>(null)
 
   const checkTypeByCode = useMemo(() => Object.fromEntries(checkTypes.map((item) => [item.code, item])), [checkTypes])
   const backCheckTypes = useMemo(() => checkTypes.filter((item) => departmentCodeById[item.department_id] === 'back_office'), [checkTypes, departmentCodeById])
@@ -243,6 +271,35 @@ export default function App() {
     } catch (caught) { alert(caught instanceof Error ? caught.message : 'Impossible de mettre à jour les arrivées avec ce fichier.') }
     finally { setImporting(false); if (fileRef.current) fileRef.current.value = '' }
   }
+  async function importCleanFile(file: File) {
+    if (!supabase || !day) return
+    setCleanImporting(true); setCleanImportSummary(null)
+    const client = supabase
+    try {
+      const parsed = parseCleanWorkbook(await file.arrayBuffer())
+      if (!parsed.length) throw new Error('Aucun état de nettoyage reconnu. Le fichier doit contenir les colonnes Reservation Number et Cleaning Status.')
+      const byNumber = new Map(rows.map((row) => [row.reservation_number, row]))
+      const matched = parsed.filter((item) => byNumber.has(item.reservation_number))
+      const notFound = parsed.length - matched.length
+      for (let index = 0; index < matched.length; index += 100) {
+        const batch = matched.slice(index, index + 100)
+        await Promise.all(batch.map(async (item) => {
+          const row = byNumber.get(item.reservation_number)
+          if (!row) return
+          const { error: updateError } = await client.from('reservations').update({ clean_status: item.clean_status }).eq('id', row.id)
+          if (updateError) throw updateError
+        }))
+      }
+      await loadRows(day.id)
+      setCleanImportSummary({ updated: matched.length, notFound, ignored: 0 })
+    } catch (caught) {
+      alert(caught instanceof Error ? caught.message : 'Impossible de mettre à jour les états des logements.')
+    } finally {
+      setCleanImporting(false)
+      if (cleanFileRef.current) cleanFileRef.current.value = ''
+    }
+  }
+
   async function addManual() {
     if (!supabase || !day) return
     const lastname = prompt('Nom du client :')?.trim(); if (!lastname) return
@@ -253,7 +310,7 @@ export default function App() {
     setRows((current) => [data as Reservation, ...current]); setExpanded((data as Reservation).id)
   }
   async function deleteReservation(row: Reservation) {
-    if (!supabase || !confirm(`Supprimer définitivement la réservation de ${fullName(row)} ?`)) return
+    if (!supabase || !row.is_last_minute || !confirm(`Supprimer la réservation Last minute de ${fullName(row)} ?`)) return
     const { error: deleteError } = await supabase.from('reservations').delete().eq('id', row.id)
     if (deleteError) { alert(deleteError.message); return }
     setExpanded(null); setRows((current) => current.filter((item) => item.id !== row.id))
@@ -313,7 +370,7 @@ export default function App() {
       </header>
       {error && <div className="error page-error">{error}</div>}
       {!day ? <div className="empty"><h2>Aucune journée</h2><p>Créez le prochain samedi d’arrivées pour commencer.</p>{canUseBack && <button className="primary" onClick={() => setShowNewDay(true)}><Plus size={17} />Créer une journée</button>}</div> : workspace === 'front' ?
-        <FrontOfficeView rows={rows} query={query} setQuery={setQuery} checked={checked} frontCheckTypes={frontCheckTypes} canEdit={canEditFront} onToggle={toggleCheck} /> :
+        <FrontOfficeView rows={rows} query={query} setQuery={setQuery} checked={checked} frontCheckTypes={frontCheckTypes} canEdit={canEditFront} onToggle={toggleCheck} cleanFileRef={cleanFileRef} cleanImporting={cleanImporting} onCleanImport={importCleanFile} /> :
         <>
           <section className="progress-card"><div><span>Avancement de la préparation</span><strong>{counts.ready} / {rows.length} réservations prêtes</strong></div><div className="progress-value">{progress}%</div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div></section>
           <section className="stats"><button onClick={() => setFilter('all')} className={filter === 'all' ? 'selected' : ''}><strong>{rows.length}</strong><span>Toutes</span></button><button onClick={() => setFilter('ready')} className={filter === 'ready' ? 'selected green-card' : ''}><strong>{counts.ready}</strong><span>CIF prêts</span></button><button onClick={() => setFilter('todo')} className={filter === 'todo' ? 'selected orange-card' : ''}><strong>{counts.todo}</strong><span>À préparer</span></button><button onClick={() => setFilter('call')} className={filter === 'call' ? 'selected' : ''}><strong>{counts.call}</strong><span>Suivi appel</span></button><button onClick={() => setFilter('due')} className={filter === 'due' ? 'selected' : ''}><strong>{counts.due}</strong><span>Avec solde</span></button></section>
@@ -332,16 +389,23 @@ export default function App() {
       <div className="drawer-section"><label>Informations de la réservation</label><div className="reservation-facts"><div><Home size={17} /><span>Hébergement</span><strong>{selected.accommodation_type || 'Non renseigné'}</strong></div><div><MapPin size={17} /><span>Emplacement</span><strong>{selected.pitch || 'Non renseigné'}</strong></div><div><Wallet size={17} /><span>Solde</span><strong>{Number(selected.remaining_amount ?? 0).toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })}</strong></div><div><Hash size={17} /><span>Canal</span><strong>{selected.booking_channel || 'Non renseigné'}</strong></div></div></div>
       <details className="drawer-edit"><summary>Modifier les informations importées</summary><div className="drawer-section form-grid"><Editable label="Prénom" value={selected.firstname ?? ''} onSave={(value) => patchReservation(selected.id, { firstname: value })} /><Editable label="Nom" value={selected.lastname ?? ''} onSave={(value) => patchReservation(selected.id, { lastname: value })} /><Editable label="Hébergement" value={selected.accommodation_type ?? ''} onSave={(value) => patchReservation(selected.id, { accommodation_type: value })} /><Editable label="Emplacement" value={selected.pitch ?? ''} onSave={(value) => patchReservation(selected.id, { pitch: value })} /><Editable label="Solde (€)" value={String(selected.remaining_amount ?? 0)} type="number" onSave={(value) => patchReservation(selected.id, { remaining_amount: Number(value) })} /><Editable label="Canal" value={selected.booking_channel ?? ''} onSave={(value) => patchReservation(selected.id, { booking_channel: value })} /></div></details>
       <NoteEditor value={selected.internal_note ?? ''} onSave={(value) => patchReservation(selected.id, { internal_note: value })} />
-      <div className="drawer-danger"><button className="danger-button" onClick={() => void deleteReservation(selected)}><Trash2 size={16} />Supprimer cette réservation</button></div>
+      {selected.is_last_minute && <div className="drawer-danger"><button className="danger-button" onClick={() => void deleteReservation(selected)}><Trash2 size={16} />Supprimer cette réservation</button></div>}
     </aside></div>}
     {importSummary && <div className="modal-backdrop" onMouseDown={() => setImportSummary(null)}><section className="modal import-summary" onMouseDown={(e) => e.stopPropagation()}><div className="summary-icon"><CircleCheck size={28} /></div><h2>Mise à jour terminée</h2><p>Les informations du fichier ont été fusionnées. Les coches, notes et statuts ont été conservés.</p><div className="summary-lines"><div><RefreshCw size={17} /><span>{importSummary.updated} réservations mises à jour</span></div><div><Plus size={17} /><span>{importSummary.added} nouvelles réservations ajoutées</span></div><div><AlertTriangle size={17} /><span>{importSummary.missing} réservations absentes, conservées</span></div></div><div className="modal-actions"><button className="primary" onClick={() => setImportSummary(null)}>Terminer</button></div></section></div>}
+    {cleanImportSummary && <div className="modal-backdrop" onMouseDown={() => setCleanImportSummary(null)}><section className="modal" onMouseDown={(e) => e.stopPropagation()}><div className="modal-icon success"><Sparkles size={24} /></div><h2>Logements mis à jour</h2><p>Seul l’état Clean du Front Office a été modifié. Les informations et le travail du Back Office restent inchangés.</p><div className="summary-lines"><div><RefreshCw size={17} /><span>{cleanImportSummary.updated} états de logement mis à jour</span></div><div><AlertTriangle size={17} /><span>{cleanImportSummary.notFound} numéros de réservation non trouvés dans cette journée</span></div></div><div className="modal-actions"><button className="primary" onClick={() => setCleanImportSummary(null)}>Terminer</button></div></section></div>}
     {showNewDay && <div className="modal-backdrop" onMouseDown={() => setShowNewDay(false)}><section className="modal" onMouseDown={(e) => e.stopPropagation()}><h2>Nouvelle journée d’arrivées</h2><p>Chaque journée conserve ses réservations, coches et notes.</p><label>Date du samedi<input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} /></label><div className="modal-actions"><button className="secondary" onClick={() => setShowNewDay(false)}>Annuler</button><button className="primary" disabled={!newDate} onClick={() => void createDay()}>Créer la journée</button></div></section></div>}
   </div>
 }
 
 function cleanLabel(status: Reservation['clean_status']) {
   const labels: Record<string, string> = {
-    propre: 'Propre', a_controler: 'À contrôler', en_cours: 'En cours', non_propre: 'Non propre', non_renseigne: 'Non renseigné',
+    clean: 'Clean', propre: 'Clean',
+    to_be_cleaned: 'À nettoyer', non_propre: 'À nettoyer',
+    in_progress: 'En cours', en_cours: 'En cours',
+    postponed: 'Reporté',
+    to_be_checked: 'À contrôler', a_controler: 'À contrôler',
+    touch_up: 'Retouche',
+    non_renseigne: 'Non renseigné',
   }
   return labels[status ?? 'non_renseigne'] ?? String(status ?? 'Non renseigné')
 }
@@ -356,9 +420,10 @@ function printFrontBoard(title: string, rows: Reservation[], checked: (id: strin
   popup.document.close()
 }
 
-function FrontOfficeView({ rows, query, setQuery, checked, frontCheckTypes, canEdit, onToggle }: {
+function FrontOfficeView({ rows, query, setQuery, checked, frontCheckTypes, canEdit, onToggle, cleanFileRef, cleanImporting, onCleanImport }: {
   rows: Reservation[], query: string, setQuery: (value: string) => void, checked: (id: string, code: string) => boolean,
   frontCheckTypes: CheckType[], canEdit: boolean, onToggle: (id: string, code: string) => Promise<void>,
+  cleanFileRef: React.RefObject<HTMLInputElement>, cleanImporting: boolean, onCleanImport: (file: File) => Promise<void>,
 }) {
   const needle = query.trim().toLocaleLowerCase('fr')
   const searched = useMemo(() => rows.filter((row) => !needle || [row.firstname, row.lastname, row.reservation_number, row.pitch, row.accommodation_type].some((value) => String(value ?? '').toLocaleLowerCase('fr').includes(needle))).sort((a, b) => fullName(a).localeCompare(fullName(b), 'fr')), [rows, needle])
@@ -366,7 +431,7 @@ function FrontOfficeView({ rows, query, setQuery, checked, frontCheckTypes, canE
   const notReady = searched.filter((row) => !checked(row.id, 'cif_ready'))
   const setupMissing = FRONT_CHECK_CODES.some((code) => !frontCheckTypes.some((type) => type.code === code)) || rows.some((row) => !('clean_status' in row))
   return <div className="front-workspace">
-    <section className="front-hero"><div><span>Suivi accueil en temps réel</span><strong>{ready.length} CIF prêts · {notReady.length} CIF pas OK</strong></div><div className="front-search"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Nom, réservation ou emplacement…" /></div></section>
+    <section className="front-hero"><div><span>Suivi accueil en temps réel</span><strong>{ready.length} CIF prêts · {notReady.length} CIF pas OK</strong></div><div className="front-hero-actions"><input ref={cleanFileRef} hidden type="file" accept=".xlsx,.xls,.csv" onChange={(event) => event.target.files?.[0] && void onCleanImport(event.target.files[0])} /><button className="front-clean-import" disabled={!canEdit || cleanImporting} onClick={() => cleanFileRef.current?.click()} title="Met uniquement à jour l’état Clean à partir du numéro de réservation"><Upload size={16} />{cleanImporting ? 'Mise à jour…' : 'Mettre à jour les logements'}</button><div className="front-search"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Nom, réservation ou emplacement…" /></div></div></section>
     {setupMissing && <div className="front-setup-warning"><AlertTriangle size={18} /><div><strong>Une étape Supabase est nécessaire</strong><span>Exécutez le fichier <code>supabase/front_office_v2.sql</code> une seule fois pour activer l’état Clean et les contrôles Plan, Clé, Macaron, Bracelets et Chien.</span></div></div>}
     <div className="front-boards">
       <FrontBoard title="CIF prêts" subtitle="Dossiers validés par le Back Office" tone="ready" rows={ready} checked={checked} types={frontCheckTypes} canEdit={canEdit} onToggle={onToggle} />
