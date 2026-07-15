@@ -357,3 +357,27 @@ header::after{content:"";position:absolute;left:0;right:0;bottom:-11px;height:1p
 .call-filter-bar button.green.active strong{background:rgba(255,255,255,.2);color:#fff}
 .row-call-status.amber{background:#fff7e6;border-color:#ead39a;color:#805a0c}
 .call-status-menu button.amber{color:#805a0c}
+
+/* Filtres métier façon Excel */
+.work-filter-wrap{position:relative}
+.work-filter-trigger{height:43px;display:inline-flex;align-items:center;gap:7px;border:1px solid #dce4e1;border-radius:11px;padding:0 11px;background:#fff;color:#40564f;font-size:12px;font-weight:750;transition:.16s ease;white-space:nowrap}
+.work-filter-trigger:hover,.work-filter-trigger.active{border-color:#7fa093;background:#f2f7f5;box-shadow:0 5px 16px rgba(22,55,45,.08)}
+.work-filter-trigger strong{display:grid;place-items:center;min-width:20px;height:20px;padding:0 5px;border-radius:999px;background:#245c4c;color:#fff;font-size:10px}
+.work-filter-menu{position:absolute;right:0;top:calc(100% + 8px);z-index:80;width:300px;padding:12px;background:rgba(255,255,255,.99);border:1px solid #dce5e1;border-radius:13px;box-shadow:0 20px 48px rgba(17,48,38,.18),0 4px 12px rgba(17,48,38,.07);animation:call-menu-in .16s cubic-bezier(.2,.8,.2,1) both}
+.work-filter-title{display:flex;align-items:center;justify-content:space-between;padding:2px 2px 10px;border-bottom:1px solid #edf1ef}
+.work-filter-title span{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.055em;color:#52675f}
+.work-filter-title button{border:0;background:transparent;color:#73827d;font-size:10.5px;padding:3px}
+.work-filter-title button:hover{color:#245c4c}
+.work-filter-group{display:grid;grid-template-columns:95px 1fr;align-items:center;gap:8px;padding:10px 2px;border-bottom:1px solid #f0f3f2}
+.work-filter-group:last-child{border-bottom:0;padding-bottom:2px}
+.work-filter-group>span{font-size:11.5px;font-weight:750;color:#40564f}
+.work-filter-group>div{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.work-filter-group button{min-height:33px;display:flex;align-items:center;justify-content:center;gap:5px;border:1px solid #dce4e1;border-radius:8px;background:#f8faf9;color:#61716c;font-size:11px;font-weight:700;transition:.14s ease}
+.work-filter-group button:hover{border-color:#a9bdb5;background:#fff}
+.work-filter-group button.selected.todo{background:#fff3df;border-color:#dfb86d;color:#855a0a}
+.work-filter-group button.selected.done{background:#eaf6ee;border-color:#8dc09e;color:#286b42}
+.active-work-filters{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin:-3px 0 11px;padding:0 3px;animation:section-rise .2s ease both}
+.active-work-filters button{display:inline-flex;align-items:center;gap:6px;border:1px solid #cbd9d4;border-radius:999px;background:#fff;color:#40564f;padding:6px 9px;font-size:10.8px;font-weight:700;transition:.14s ease}
+.active-work-filters button:hover{border-color:#8ca99f;background:#f3f8f6}
+.active-work-filters button.clear-all{border-color:transparent;background:transparent;color:#71817b;font-weight:650}
+@media(max-width:900px){.work-filter-menu{right:auto;left:0;width:min(300px,calc(100vw - 28px))}.toolbar-right{flex-wrap:wrap}.active-work-filters{overflow-x:auto;flex-wrap:nowrap;padding-bottom:3px}.active-work-filters button{flex:0 0 auto}}
