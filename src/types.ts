@@ -16,6 +16,7 @@ export type ArrivalDay = {
   status: 'open' | 'archived'
   created_at?: string
   updated_at?: string
+  front_clean_initialized?: boolean
 }
 
 export type Reservation = {
@@ -33,6 +34,8 @@ export type Reservation = {
   call_status: CallStatus | null
   internal_note: string | null
   clean_status?: 'non_renseigne' | 'clean' | 'to_be_cleaned' | 'in_progress' | 'postponed' | 'to_be_checked' | 'touch_up' | string | null
+  clean_previous_status?: string | null
+  clean_changed_at?: string | null
   created_at?: string
   updated_at?: string
 }
