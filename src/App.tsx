@@ -135,7 +135,8 @@ export default function App() {
   const [error, setError] = useState('')
   const [importSummary, setImportSummary] = useState<{ total: number, added: number, updated: number, missing: number } | null>(null)
   const [cleanImporting, setCleanImporting] = useState(false)
-  const [cleanImportSummary, setCleanImportSummary] = useState<{ updated: number, changed: number, notFound: number, ignored: number } | null>(null)
+  const [cleanImportSummary, setCleanImportSummary] = useState<{ updated: number, changed: number, added: number, missing: number } | null>(null)
+  const [pendingMissingRows, setPendingMissingRows] = useState<FrontDayRow[]>([])
   const [cleanTracking, setCleanTracking] = useState(false)
   const [cleanBaselineReady, setCleanBaselineReady] = useState(false)
   const [changedCleanIds, setChangedCleanIds] = useState<Set<string>>(new Set())
@@ -298,7 +299,9 @@ export default function App() {
       const isFirstImport = frontDayRows.length === 0
       let updated = 0
       let changed = 0
-      let notFound = 0
+      let added = 0
+      const incomingNumbers = new Set(parsed.map((item) => item.reservation_number))
+      const missingRows = isFirstImport ? [] : frontDayRows.filter((row) => !incomingNumbers.has(row.reservation_number))
 
       if (isFirstImport) {
         const payload = parsed.map((item) => ({
@@ -312,6 +315,7 @@ export default function App() {
           clean_previous_status: null,
           clean_changed_at: null,
           is_verified: false,
+          is_last_minute: false,
         }))
         for (let index = 0; index < payload.length; index += 100) {
           const { error: insertError } = await supabase.from('front_day_rows').upsert(payload.slice(index, index + 100), { onConflict: 'arrival_day_id,reservation_number' })
@@ -323,13 +327,35 @@ export default function App() {
         if (clearError) throw clearError
         for (const item of parsed) {
           const current = existingByNumber.get(item.reservation_number)
-          if (!current) { notFound += 1; continue }
+          if (!current) {
+            const { error: insertError } = await supabase.from('front_day_rows').insert({
+              arrival_day_id: day.id,
+              reservation_number: item.reservation_number,
+              firstname: item.firstname,
+              lastname: item.lastname,
+              accommodation_type: item.accommodation_type,
+              pitch: item.pitch,
+              clean_status: item.clean_status,
+              clean_previous_status: null,
+              clean_changed_at: null,
+              is_verified: false,
+              is_last_minute: true,
+            })
+            if (insertError) throw insertError
+            added += 1
+            continue
+          }
           const previous = current.clean_status ?? 'non_renseigne'
           const hasChanged = previous !== item.clean_status
           const { error: updateError } = await supabase.from('front_day_rows').update({
+            firstname: item.firstname ?? current.firstname,
+            lastname: item.lastname ?? current.lastname,
+            accommodation_type: item.accommodation_type ?? current.accommodation_type,
+            pitch: item.pitch ?? current.pitch,
             clean_status: item.clean_status,
             clean_previous_status: hasChanged ? previous : null,
             clean_changed_at: hasChanged ? new Date().toISOString() : null,
+            is_verified: hasChanged ? false : current.is_verified,
             updated_at: new Date().toISOString(),
           }).eq('id', current.id)
           if (updateError) throw updateError
@@ -339,9 +365,10 @@ export default function App() {
       }
 
       await loadFrontDayRows(day.id)
+      setPendingMissingRows(missingRows)
       setCleanBaselineReady(true)
       setCleanTracking(true)
-      setCleanImportSummary({ updated, changed, notFound, ignored: 0 })
+      setCleanImportSummary({ updated, changed, added, missing: missingRows.length })
     } catch (caught) {
       alert(caught instanceof Error ? caught.message : 'Impossible de mettre à jour le contrôle de journée.')
     } finally {
@@ -362,9 +389,32 @@ export default function App() {
     const row = frontDayRows.find((item) => item.id === id)
     if (!row) return
     const next = !row.is_verified
-    setFrontDayRows((current) => current.map((item) => item.id === id ? { ...item, is_verified: next } : item))
-    const { error: updateError } = await supabase.from('front_day_rows').update({ is_verified: next, updated_at: new Date().toISOString() }).eq('id', id)
+    const clearsChange = next && Boolean(row.clean_changed_at)
+    setFrontDayRows((current) => current.map((item) => item.id === id ? {
+      ...item,
+      is_verified: next,
+      clean_previous_status: clearsChange ? null : item.clean_previous_status,
+      clean_changed_at: clearsChange ? null : item.clean_changed_at,
+    } : item))
+    const { error: updateError } = await supabase.from('front_day_rows').update({
+      is_verified: next,
+      clean_previous_status: clearsChange ? null : row.clean_previous_status,
+      clean_changed_at: clearsChange ? null : row.clean_changed_at,
+      updated_at: new Date().toISOString(),
+    }).eq('id', id)
     if (updateError) { alert(updateError.message); await loadFrontDayRows(row.arrival_day_id) }
+  }
+
+  async function resolveMissingRows(remove: boolean) {
+    if (!supabase || !day) return
+    if (remove && pendingMissingRows.length) {
+      const ids = pendingMissingRows.map((row) => row.id)
+      const { error: deleteError } = await supabase.from('front_day_rows').delete().in('id', ids)
+      if (deleteError) { alert(deleteError.message); return }
+      setFrontDayRows((current) => current.filter((row) => !ids.includes(row.id)))
+    }
+    setPendingMissingRows([])
+    setCleanImportSummary(null)
   }
 
   async function addManual() {
@@ -461,7 +511,7 @@ export default function App() {
       <div className="drawer-danger"><button className="danger-button" onClick={() => void deleteReservation(selected)}><Trash2 size={16} />Supprimer cette réservation</button></div>
     </aside></div>}
     {importSummary && <div className="modal-backdrop" onMouseDown={() => setImportSummary(null)}><section className="modal import-summary" onMouseDown={(e) => e.stopPropagation()}><div className="summary-icon"><CircleCheck size={28} /></div><h2>Mise à jour terminée</h2><p>Les informations du fichier ont été fusionnées. Les coches, notes et statuts ont été conservés.</p><div className="summary-lines"><div><RefreshCw size={17} /><span>{importSummary.updated} réservations mises à jour</span></div><div><Plus size={17} /><span>{importSummary.added} nouvelles réservations ajoutées</span></div><div><AlertTriangle size={17} /><span>{importSummary.missing} réservations absentes, conservées</span></div></div><div className="modal-actions"><button className="primary" onClick={() => setImportSummary(null)}>Terminer</button></div></section></div>}
-    {cleanImportSummary && <div className="modal-backdrop" onMouseDown={() => setCleanImportSummary(null)}><section className="modal" onMouseDown={(e) => e.stopPropagation()}><div className="modal-icon success"><Sparkles size={24} /></div><h2>Logements mis à jour</h2><p>Seul l’état Clean du Front Office a été modifié. Les informations et le travail du Back Office restent inchangés.</p><div className="summary-lines"><div><RefreshCw size={17} /><span>{cleanImportSummary.updated} états de logement lus · {cleanImportSummary.changed} changement{cleanImportSummary.changed !== 1 ? 's' : ''} détecté{cleanImportSummary.changed !== 1 ? 's' : ''}</span></div><div><AlertTriangle size={17} /><span>{cleanImportSummary.notFound} numéros de réservation non trouvés dans cette journée</span></div></div><div className="modal-actions"><button className="primary" onClick={() => setCleanImportSummary(null)}>Terminer</button></div></section></div>}
+    {cleanImportSummary && <div className="modal-backdrop"><section className="modal" onMouseDown={(e) => e.stopPropagation()}><div className="modal-icon success"><Sparkles size={24} /></div><h2>Contrôle journée mis à jour</h2><p>Les statuts Clean ont été comparés par numéro de réservation. Le Back Office reste inchangé.</p><div className="summary-lines"><div><RefreshCw size={17} /><span>{cleanImportSummary.updated} réservations mises à jour · {cleanImportSummary.changed} changement{cleanImportSummary.changed !== 1 ? 's' : ''} détecté{cleanImportSummary.changed !== 1 ? 's' : ''}</span></div><div><Plus size={17} /><span>{cleanImportSummary.added} nouvelle{cleanImportSummary.added !== 1 ? 's' : ''} réservation{cleanImportSummary.added !== 1 ? 's' : ''} ajoutée{cleanImportSummary.added !== 1 ? 's' : ''} avec la mention Last minute</span></div>{cleanImportSummary.missing > 0 && <div><AlertTriangle size={17} /><span>{cleanImportSummary.missing} réservation{cleanImportSummary.missing !== 1 ? 's sont' : ' est'} absente{cleanImportSummary.missing !== 1 ? 's' : ''} du nouveau fichier</span></div>}</div><div className="modal-actions">{cleanImportSummary.missing > 0 ? <><button className="secondary" onClick={() => void resolveMissingRows(false)}>Garder les absentes</button><button className="danger-button" onClick={() => void resolveMissingRows(true)}>Supprimer les absentes</button></> : <button className="primary" onClick={() => void resolveMissingRows(false)}>Terminer</button>}</div></section></div>}
     {showNewDay && <div className="modal-backdrop" onMouseDown={() => setShowNewDay(false)}><section className="modal" onMouseDown={(e) => e.stopPropagation()}><h2>Nouvelle journée d’arrivées</h2><p>Chaque journée conserve ses réservations, coches et notes.</p><label>Date du samedi<input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} /></label><div className="modal-actions"><button className="secondary" onClick={() => setShowNewDay(false)}>Annuler</button><button className="primary" disabled={!newDate} onClick={() => void createDay()}>Créer la journée</button></div></section></div>}
   </div>
 }
@@ -569,7 +619,7 @@ function DayCheckRow({ row, canEdit, onToggle }: { row: FrontDayRow, canEdit: bo
   const status = row.clean_status ?? 'non_renseigne'
   const previous = row.clean_previous_status ?? 'non_renseigne'
   const changed = Boolean(row.clean_changed_at)
-  return <article className={`day-check-row ${row.is_verified ? 'is-ok' : ''} ${changed ? 'is-changed' : ''}`}><div className="day-check-client"><div className="avatar">{(row.firstname?.[0] ?? '?').toUpperCase()}{(row.lastname?.[0] ?? '').toUpperCase()}</div><div><h3>{(row.lastname ?? '').toUpperCase()} {row.firstname}</h3><p><Hash size={13} />{row.reservation_number}</p><span><MapPin size={13} />{row.pitch || 'Sans emplacement'} · {row.accommodation_type || 'Hébergement non renseigné'}</span></div></div><div className="day-check-clean">{changed && <span className="status-change-label"><RefreshCw size={12} />Changement détecté</span>}<div className={`clean-status ${status}`}><Sparkles size={14} /><span>Clean</span><strong>{cleanLabel(status)}</strong></div>{changed && <small>{cleanLabel(previous)} <ChevronRight size={12} /> <strong>{cleanLabel(status)}</strong></small>}</div><button disabled={!canEdit} className={`day-ok-button ${row.is_verified ? 'checked' : ''}`} onClick={() => void onToggle()}>{row.is_verified ? <CircleCheck size={20} /> : <span className="empty-check" />}<span>{row.is_verified ? 'Vérifié' : 'Marquer OK'}</span></button></article>
+  return <article className={`day-check-row ${row.is_verified ? 'is-ok' : ''} ${changed ? 'is-changed' : ''}`}><div className="day-check-client"><div className="avatar">{(row.firstname?.[0] ?? '?').toUpperCase()}{(row.lastname?.[0] ?? '').toUpperCase()}</div><div><h3>{(row.lastname ?? '').toUpperCase()} {row.firstname}{row.is_last_minute && <em className="day-last-minute">Last minute</em>}</h3><p><Hash size={13} />{row.reservation_number}</p><span><MapPin size={13} />{row.pitch || 'Sans emplacement'} · {row.accommodation_type || 'Hébergement non renseigné'}</span></div></div><div className="day-check-clean">{changed && <span className="status-change-label"><RefreshCw size={12} />Changement détecté</span>}<div className={`clean-status ${status}`}><Sparkles size={14} /><span>Clean</span><strong>{cleanLabel(status)}</strong></div>{changed && <small>{cleanLabel(previous)} <ChevronRight size={12} /> <strong>{cleanLabel(status)}</strong></small>}</div><button disabled={!canEdit} className={`day-ok-button ${row.is_verified ? 'checked' : ''}`} onClick={() => void onToggle()}>{row.is_verified ? <CircleCheck size={20} /> : <span className="empty-check" />}<span>{row.is_verified ? 'Vérifié' : 'Marquer OK'}</span></button></article>
 }
 
 function FrontBoard({ title, subtitle, tone, rows, checked, types, canEdit, onToggle, changedCleanIds }: {

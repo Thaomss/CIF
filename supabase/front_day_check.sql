@@ -11,6 +11,7 @@ create table if not exists public.front_day_rows (
   clean_previous_status text,
   clean_changed_at timestamptz,
   is_verified boolean not null default false,
+  is_last_minute boolean not null default false,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique(arrival_day_id, reservation_number)
@@ -30,3 +31,6 @@ do $$ begin
   alter publication supabase_realtime add table public.front_day_rows;
 exception when duplicate_object then null;
 end $$;
+
+-- Mise à niveau si la table existait déjà avant l'ajout des Last minute.
+alter table public.front_day_rows add column if not exists is_last_minute boolean not null default false;

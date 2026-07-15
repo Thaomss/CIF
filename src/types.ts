@@ -78,6 +78,7 @@ export type FrontDayRow = {
   clean_previous_status: string | null
   clean_changed_at: string | null
   is_verified: boolean
+  is_last_minute: boolean
   created_at?: string
   updated_at?: string
 }
