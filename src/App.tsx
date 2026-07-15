@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowUpDown, CalendarDays, Check, ChevronDown, ChevronRight, CircleCheck, Dog, Hash, Home,
   KeyRound, LogOut, Map as MapIcon, MapPin, MessageSquare, Phone, Plus, RefreshCw, Search, Sparkles,
-  Tag, Trash2, Upload, Wallet, Wifi, X, AlertTriangle, UsersRound, Printer, SlidersHorizontal,
+  Tag, Trash2, Upload, Wallet, Wifi, X, AlertTriangle, UsersRound, Printer, SlidersHorizontal, Eye,
 } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import { hasSupabase, supabase } from './supabase'
@@ -135,7 +135,10 @@ export default function App() {
   const [error, setError] = useState('')
   const [importSummary, setImportSummary] = useState<{ total: number, added: number, updated: number, missing: number } | null>(null)
   const [cleanImporting, setCleanImporting] = useState(false)
-  const [cleanImportSummary, setCleanImportSummary] = useState<{ updated: number, notFound: number, ignored: number } | null>(null)
+  const [cleanImportSummary, setCleanImportSummary] = useState<{ updated: number, changed: number, notFound: number, ignored: number } | null>(null)
+  const [cleanTracking, setCleanTracking] = useState(false)
+  const [cleanBaselineReady, setCleanBaselineReady] = useState(false)
+  const [changedCleanIds, setChangedCleanIds] = useState<Set<string>>(new Set())
   const fileRef = useRef<HTMLInputElement>(null)
   const cleanFileRef = useRef<HTMLInputElement>(null)
 
@@ -280,6 +283,10 @@ export default function App() {
       if (!parsed.length) throw new Error('Aucun état de nettoyage reconnu. Le fichier doit contenir les colonnes Reservation Number et Cleaning Status.')
       const byNumber = new Map(rows.map((row) => [row.reservation_number, row]))
       const matched = parsed.filter((item) => byNumber.has(item.reservation_number))
+      const changedIds = matched.flatMap((item) => {
+        const row = byNumber.get(item.reservation_number)
+        return row && (row.clean_status ?? 'non_renseigne') !== item.clean_status ? [row.id] : []
+      })
       const notFound = parsed.length - matched.length
       for (let index = 0; index < matched.length; index += 100) {
         const batch = matched.slice(index, index + 100)
@@ -291,7 +298,11 @@ export default function App() {
         }))
       }
       await loadRows(day.id)
-      setCleanImportSummary({ updated: matched.length, notFound, ignored: 0 })
+      if (cleanTracking) {
+        if (cleanBaselineReady) setChangedCleanIds(new Set(changedIds))
+        else { setCleanBaselineReady(true); setChangedCleanIds(new Set()) }
+      }
+      setCleanImportSummary({ updated: matched.length, changed: cleanTracking && cleanBaselineReady ? changedIds.length : 0, notFound, ignored: 0 })
     } catch (caught) {
       alert(caught instanceof Error ? caught.message : 'Impossible de mettre à jour les états des logements.')
     } finally {
@@ -310,7 +321,7 @@ export default function App() {
     setRows((current) => [data as Reservation, ...current]); setExpanded((data as Reservation).id)
   }
   async function deleteReservation(row: Reservation) {
-    if (!supabase || !row.is_last_minute || !confirm(`Supprimer la réservation Last minute de ${fullName(row)} ?`)) return
+    if (!supabase || !confirm(`Supprimer définitivement la réservation de ${fullName(row)} (${row.reservation_number}) ?`)) return
     const { error: deleteError } = await supabase.from('reservations').delete().eq('id', row.id)
     if (deleteError) { alert(deleteError.message); return }
     setExpanded(null); setRows((current) => current.filter((item) => item.id !== row.id))
@@ -370,7 +381,7 @@ export default function App() {
       </header>
       {error && <div className="error page-error">{error}</div>}
       {!day ? <div className="empty"><h2>Aucune journée</h2><p>Créez le prochain samedi d’arrivées pour commencer.</p>{canUseBack && <button className="primary" onClick={() => setShowNewDay(true)}><Plus size={17} />Créer une journée</button>}</div> : workspace === 'front' ?
-        <FrontOfficeView rows={rows} query={query} setQuery={setQuery} checked={checked} frontCheckTypes={frontCheckTypes} canEdit={canEditFront} onToggle={toggleCheck} cleanFileRef={cleanFileRef} cleanImporting={cleanImporting} onCleanImport={importCleanFile} /> :
+        <FrontOfficeView rows={rows} query={query} setQuery={setQuery} checked={checked} frontCheckTypes={frontCheckTypes} canEdit={canEditFront} onToggle={toggleCheck} cleanFileRef={cleanFileRef} cleanImporting={cleanImporting} onCleanImport={importCleanFile} cleanTracking={cleanTracking} cleanBaselineReady={cleanBaselineReady} changedCleanIds={changedCleanIds} onToggleTracking={() => { setCleanTracking((current) => !current); setCleanBaselineReady(false); setChangedCleanIds(new Set()) }} onClearChanges={() => setChangedCleanIds(new Set())} /> :
         <>
           <section className="progress-card"><div><span>Avancement de la préparation</span><strong>{counts.ready} / {rows.length} réservations prêtes</strong></div><div className="progress-value">{progress}%</div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div></section>
           <section className="stats"><button onClick={() => setFilter('all')} className={filter === 'all' ? 'selected' : ''}><strong>{rows.length}</strong><span>Toutes</span></button><button onClick={() => setFilter('ready')} className={filter === 'ready' ? 'selected green-card' : ''}><strong>{counts.ready}</strong><span>CIF prêts</span></button><button onClick={() => setFilter('todo')} className={filter === 'todo' ? 'selected orange-card' : ''}><strong>{counts.todo}</strong><span>À préparer</span></button><button onClick={() => setFilter('call')} className={filter === 'call' ? 'selected' : ''}><strong>{counts.call}</strong><span>Suivi appel</span></button><button onClick={() => setFilter('due')} className={filter === 'due' ? 'selected' : ''}><strong>{counts.due}</strong><span>Avec solde</span></button></section>
@@ -389,10 +400,10 @@ export default function App() {
       <div className="drawer-section"><label>Informations de la réservation</label><div className="reservation-facts"><div><Home size={17} /><span>Hébergement</span><strong>{selected.accommodation_type || 'Non renseigné'}</strong></div><div><MapPin size={17} /><span>Emplacement</span><strong>{selected.pitch || 'Non renseigné'}</strong></div><div><Wallet size={17} /><span>Solde</span><strong>{Number(selected.remaining_amount ?? 0).toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })}</strong></div><div><Hash size={17} /><span>Canal</span><strong>{selected.booking_channel || 'Non renseigné'}</strong></div></div></div>
       <details className="drawer-edit"><summary>Modifier les informations importées</summary><div className="drawer-section form-grid"><Editable label="Prénom" value={selected.firstname ?? ''} onSave={(value) => patchReservation(selected.id, { firstname: value })} /><Editable label="Nom" value={selected.lastname ?? ''} onSave={(value) => patchReservation(selected.id, { lastname: value })} /><Editable label="Hébergement" value={selected.accommodation_type ?? ''} onSave={(value) => patchReservation(selected.id, { accommodation_type: value })} /><Editable label="Emplacement" value={selected.pitch ?? ''} onSave={(value) => patchReservation(selected.id, { pitch: value })} /><Editable label="Solde (€)" value={String(selected.remaining_amount ?? 0)} type="number" onSave={(value) => patchReservation(selected.id, { remaining_amount: Number(value) })} /><Editable label="Canal" value={selected.booking_channel ?? ''} onSave={(value) => patchReservation(selected.id, { booking_channel: value })} /></div></details>
       <NoteEditor value={selected.internal_note ?? ''} onSave={(value) => patchReservation(selected.id, { internal_note: value })} />
-      {selected.is_last_minute && <div className="drawer-danger"><button className="danger-button" onClick={() => void deleteReservation(selected)}><Trash2 size={16} />Supprimer cette réservation</button></div>}
+      <div className="drawer-danger"><button className="danger-button" onClick={() => void deleteReservation(selected)}><Trash2 size={16} />Supprimer cette réservation</button></div>
     </aside></div>}
     {importSummary && <div className="modal-backdrop" onMouseDown={() => setImportSummary(null)}><section className="modal import-summary" onMouseDown={(e) => e.stopPropagation()}><div className="summary-icon"><CircleCheck size={28} /></div><h2>Mise à jour terminée</h2><p>Les informations du fichier ont été fusionnées. Les coches, notes et statuts ont été conservés.</p><div className="summary-lines"><div><RefreshCw size={17} /><span>{importSummary.updated} réservations mises à jour</span></div><div><Plus size={17} /><span>{importSummary.added} nouvelles réservations ajoutées</span></div><div><AlertTriangle size={17} /><span>{importSummary.missing} réservations absentes, conservées</span></div></div><div className="modal-actions"><button className="primary" onClick={() => setImportSummary(null)}>Terminer</button></div></section></div>}
-    {cleanImportSummary && <div className="modal-backdrop" onMouseDown={() => setCleanImportSummary(null)}><section className="modal" onMouseDown={(e) => e.stopPropagation()}><div className="modal-icon success"><Sparkles size={24} /></div><h2>Logements mis à jour</h2><p>Seul l’état Clean du Front Office a été modifié. Les informations et le travail du Back Office restent inchangés.</p><div className="summary-lines"><div><RefreshCw size={17} /><span>{cleanImportSummary.updated} états de logement mis à jour</span></div><div><AlertTriangle size={17} /><span>{cleanImportSummary.notFound} numéros de réservation non trouvés dans cette journée</span></div></div><div className="modal-actions"><button className="primary" onClick={() => setCleanImportSummary(null)}>Terminer</button></div></section></div>}
+    {cleanImportSummary && <div className="modal-backdrop" onMouseDown={() => setCleanImportSummary(null)}><section className="modal" onMouseDown={(e) => e.stopPropagation()}><div className="modal-icon success"><Sparkles size={24} /></div><h2>Logements mis à jour</h2><p>Seul l’état Clean du Front Office a été modifié. Les informations et le travail du Back Office restent inchangés.</p><div className="summary-lines"><div><RefreshCw size={17} /><span>{cleanImportSummary.updated} états de logement lus · {cleanImportSummary.changed} changement{cleanImportSummary.changed !== 1 ? 's' : ''} détecté{cleanImportSummary.changed !== 1 ? 's' : ''}</span></div><div><AlertTriangle size={17} /><span>{cleanImportSummary.notFound} numéros de réservation non trouvés dans cette journée</span></div></div><div className="modal-actions"><button className="primary" onClick={() => setCleanImportSummary(null)}>Terminer</button></div></section></div>}
     {showNewDay && <div className="modal-backdrop" onMouseDown={() => setShowNewDay(false)}><section className="modal" onMouseDown={(e) => e.stopPropagation()}><h2>Nouvelle journée d’arrivées</h2><p>Chaque journée conserve ses réservations, coches et notes.</p><label>Date du samedi<input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} /></label><div className="modal-actions"><button className="secondary" onClick={() => setShowNewDay(false)}>Annuler</button><button className="primary" disabled={!newDate} onClick={() => void createDay()}>Créer la journée</button></div></section></div>}
   </div>
 }
@@ -409,47 +420,80 @@ function cleanLabel(status: Reservation['clean_status']) {
   }
   return labels[status ?? 'non_renseigne'] ?? String(status ?? 'Non renseigné')
 }
-function printFrontBoard(title: string, rows: Reservation[], checked: (id: string, code: string) => boolean) {
+type FrontPrintOptions = {
+  sort: 'name' | 'pitch'
+  client: boolean
+  reservation: boolean
+  pitch: boolean
+  accommodation: boolean
+  clean: boolean
+  checks: boolean
+}
+function sortFrontRows(rows: Reservation[], sort: 'name' | 'pitch') {
+  return [...rows].sort((a, b) => sort === 'pitch'
+    ? String(a.pitch ?? '').localeCompare(String(b.pitch ?? ''), 'fr', { numeric: true }) || fullName(a).localeCompare(fullName(b), 'fr')
+    : fullName(a).localeCompare(fullName(b), 'fr'))
+}
+function printFrontBoard(title: string, rows: Reservation[], checked: (id: string, code: string) => boolean, options: FrontPrintOptions) {
   const popup = window.open('', '_blank', 'width=1100,height=800')
   if (!popup) { alert('Le navigateur a bloqué la fenêtre d’impression. Autorisez les fenêtres contextuelles puis réessayez.'); return }
   const escape = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char] ?? char))
-  const boxes = (row: Reservation) => ['plan', 'key_ready', 'sticker', 'bracelets', 'dog'].map((code) => `<td class="box">${checked(row.id, code) ? '✓' : '□'}</td>`).join('')
+  const orderedRows = sortFrontRows(rows, options.sort)
+  const headers = [options.client && '<th>Client</th>', options.reservation && '<th>Réservation</th>', options.pitch && '<th>Emplacement</th>', options.accommodation && '<th>Hébergement</th>', options.clean && '<th>Clean</th>', options.checks && '<th>Plan</th><th>Clé</th><th>Macaron</th><th>Bracelets</th><th>Chien</th>'].filter(Boolean).join('')
+  const cells = (row: Reservation) => [
+    options.client && `<td class="client">${escape((row.lastname ?? '').toUpperCase())} ${escape(row.firstname)}</td>`,
+    options.reservation && `<td>${escape(row.reservation_number)}</td>`,
+    options.pitch && `<td>${escape(row.pitch || '—')}</td>`,
+    options.accommodation && `<td>${escape(row.accommodation_type || '—')}</td>`,
+    options.clean && `<td class="clean">${escape(cleanLabel(row.clean_status))}</td>`,
+    options.checks && ['plan', 'key_ready', 'sticker', 'bracelets', 'dog'].map((code) => `<td class="box">${checked(row.id, code) ? '✓' : '□'}</td>`).join(''),
+  ].filter(Boolean).join('')
   popup.document.write(`<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>${escape(title)}</title><style>
-    @page{size:A4 landscape;margin:10mm}*{box-sizing:border-box}body{font-family:Arial,sans-serif;color:#172b24;margin:0}h1{font-size:22px;margin:0 0 4px}p{margin:0 0 14px;color:#65736e;font-size:12px}table{width:100%;border-collapse:collapse;font-size:10px}th,td{border:1px solid #aebbb6;padding:6px 7px;text-align:left;vertical-align:middle}th{background:#edf3f0;font-size:9px;text-transform:uppercase;letter-spacing:.04em}.box{text-align:center;font-size:14px;width:55px}.clean{font-weight:700;white-space:nowrap}.client{font-weight:700}@media print{button{display:none}}
-  </style></head><body><h1>${escape(title)}</h1><p>${rows.length} réservation${rows.length > 1 ? 's' : ''} · imprimé le ${new Date().toLocaleString('fr-FR')}</p><table><thead><tr><th>Client</th><th>Réservation</th><th>Emplacement</th><th>Hébergement</th><th>Clean</th><th>Plan</th><th>Clé</th><th>Macaron</th><th>Bracelets</th><th>Chien</th></tr></thead><tbody>${rows.map((row) => `<tr><td class="client">${escape((row.lastname ?? '').toUpperCase())} ${escape(row.firstname)}</td><td>${escape(row.reservation_number)}</td><td>${escape(row.pitch || '—')}</td><td>${escape(row.accommodation_type || '—')}</td><td class="clean">${escape(cleanLabel(row.clean_status))}</td>${boxes(row)}</tr>`).join('')}</tbody></table><script>window.onload=()=>{window.print()}<\/script></body></html>`)
+    @page{size:A4 landscape;margin:10mm}*{box-sizing:border-box}body{font-family:Arial,sans-serif;color:#172b24;margin:0}h1{font-size:22px;margin:0 0 4px}p{margin:0 0 14px;color:#65736e;font-size:12px}table{width:100%;border-collapse:collapse;font-size:10px}th,td{border:1px solid #aebbb6;padding:6px 7px;text-align:left;vertical-align:middle}th{background:#edf3f0;font-size:9px;text-transform:uppercase;letter-spacing:.04em}.box{text-align:center;font-size:14px;width:55px}.clean{font-weight:700;white-space:nowrap}.client{font-weight:700}
+  </style></head><body><h1>${escape(title)}</h1><p>${orderedRows.length} réservation${orderedRows.length > 1 ? 's' : ''} · triées par ${options.sort === 'pitch' ? 'emplacement' : 'nom'} · imprimé le ${new Date().toLocaleString('fr-FR')}</p><table><thead><tr>${headers}</tr></thead><tbody>${orderedRows.map((row) => `<tr>${cells(row)}</tr>`).join('')}</tbody></table><script>window.onload=()=>{window.print()}<\/script></body></html>`)
   popup.document.close()
 }
 
-function FrontOfficeView({ rows, query, setQuery, checked, frontCheckTypes, canEdit, onToggle, cleanFileRef, cleanImporting, onCleanImport }: {
+function FrontOfficeView({ rows, query, setQuery, checked, frontCheckTypes, canEdit, onToggle, cleanFileRef, cleanImporting, onCleanImport, cleanTracking, cleanBaselineReady, changedCleanIds, onToggleTracking, onClearChanges }: {
   rows: Reservation[], query: string, setQuery: (value: string) => void, checked: (id: string, code: string) => boolean,
   frontCheckTypes: CheckType[], canEdit: boolean, onToggle: (id: string, code: string) => Promise<void>,
   cleanFileRef: React.RefObject<HTMLInputElement>, cleanImporting: boolean, onCleanImport: (file: File) => Promise<void>,
+  cleanTracking: boolean, cleanBaselineReady: boolean, changedCleanIds: Set<string>, onToggleTracking: () => void, onClearChanges: () => void,
 }) {
+  const [frontSort, setFrontSort] = useState<'name' | 'pitch'>('name')
   const needle = query.trim().toLocaleLowerCase('fr')
-  const searched = useMemo(() => rows.filter((row) => !needle || [row.firstname, row.lastname, row.reservation_number, row.pitch, row.accommodation_type].some((value) => String(value ?? '').toLocaleLowerCase('fr').includes(needle))).sort((a, b) => fullName(a).localeCompare(fullName(b), 'fr')), [rows, needle])
+  const searched = useMemo(() => sortFrontRows(rows.filter((row) => !needle || [row.firstname, row.lastname, row.reservation_number, row.pitch, row.accommodation_type].some((value) => String(value ?? '').toLocaleLowerCase('fr').includes(needle))), frontSort), [rows, needle, frontSort])
   const ready = searched.filter((row) => checked(row.id, 'cif_ready'))
   const notReady = searched.filter((row) => !checked(row.id, 'cif_ready'))
   const setupMissing = FRONT_CHECK_CODES.some((code) => !frontCheckTypes.some((type) => type.code === code)) || rows.some((row) => !('clean_status' in row))
   return <div className="front-workspace">
-    <section className="front-hero"><div><span>Suivi accueil en temps réel</span><strong>{ready.length} CIF prêts · {notReady.length} CIF pas OK</strong></div><div className="front-hero-actions"><input ref={cleanFileRef} hidden type="file" accept=".xlsx,.xls,.csv" onChange={(event) => event.target.files?.[0] && void onCleanImport(event.target.files[0])} /><button className="front-clean-import" disabled={!canEdit || cleanImporting} onClick={() => cleanFileRef.current?.click()} title="Met uniquement à jour l’état Clean à partir du numéro de réservation"><Upload size={16} />{cleanImporting ? 'Mise à jour…' : 'Mettre à jour les logements'}</button><div className="front-search"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Nom, réservation ou emplacement…" /></div></div></section>
+    <section className="front-hero"><div><span>Suivi accueil en temps réel</span><strong>{ready.length} CIF prêts · {notReady.length} CIF pas OK</strong></div><div className="front-hero-actions">
+      <button className={`front-track-toggle ${cleanTracking ? 'active' : ''}`} onClick={onToggleTracking}><Eye size={16} />{cleanTracking ? (cleanBaselineReady ? 'Suivi actif' : 'Suivi prêt') : 'Vérifier les changements'}</button>
+      {changedCleanIds.size > 0 && <button className="front-clear-changes" onClick={onClearChanges}>{changedCleanIds.size} modifiée{changedCleanIds.size > 1 ? 's' : ''} · effacer</button>}
+      <input ref={cleanFileRef} hidden type="file" accept=".xlsx,.xls,.csv" onChange={(event) => event.target.files?.[0] && void onCleanImport(event.target.files[0])} /><button className="front-clean-import" disabled={!canEdit || cleanImporting} onClick={() => cleanFileRef.current?.click()} title="Met uniquement à jour l’état Clean à partir du numéro de réservation"><Upload size={16} />{cleanImporting ? 'Mise à jour…' : 'Mettre à jour les logements'}</button>
+      <label className="front-sort"><ArrowUpDown size={15} /><select value={frontSort} onChange={(event) => setFrontSort(event.target.value as 'name' | 'pitch')}><option value="name">Nom</option><option value="pitch">Emplacement</option></select></label>
+      <div className="front-search"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Nom, réservation ou emplacement…" /></div></div></section>
+    {cleanTracking && !cleanBaselineReady && <div className="front-tracking-info"><Eye size={16} /><span>Le prochain tableau servira de point de départ. Les suivants signaleront uniquement les logements dont l’état a changé.</span></div>}
     {setupMissing && <div className="front-setup-warning"><AlertTriangle size={18} /><div><strong>Une étape Supabase est nécessaire</strong><span>Exécutez le fichier <code>supabase/front_office_v2.sql</code> une seule fois pour activer l’état Clean et les contrôles Plan, Clé, Macaron, Bracelets et Chien.</span></div></div>}
     <div className="front-boards">
-      <FrontBoard title="CIF prêts" subtitle="Dossiers validés par le Back Office" tone="ready" rows={ready} checked={checked} types={frontCheckTypes} canEdit={canEdit} onToggle={onToggle} />
-      <FrontBoard title="CIF pas OK" subtitle="En attente de validation du Back Office" tone="pending" rows={notReady} checked={checked} types={frontCheckTypes} canEdit={canEdit} onToggle={onToggle} />
+      <FrontBoard title="CIF prêts" subtitle="Dossiers validés par le Back Office" tone="ready" rows={ready} checked={checked} types={frontCheckTypes} canEdit={canEdit} onToggle={onToggle} changedCleanIds={changedCleanIds} />
+      <FrontBoard title="CIF pas OK" subtitle="En attente de validation du Back Office" tone="pending" rows={notReady} checked={checked} types={frontCheckTypes} canEdit={canEdit} onToggle={onToggle} changedCleanIds={changedCleanIds} />
     </div>
   </div>
 }
-function FrontBoard({ title, subtitle, tone, rows, checked, types, canEdit, onToggle }: {
+function FrontBoard({ title, subtitle, tone, rows, checked, types, canEdit, onToggle, changedCleanIds }: {
   title: string, subtitle: string, tone: 'ready' | 'pending', rows: Reservation[], checked: (id: string, code: string) => boolean,
-  types: CheckType[], canEdit: boolean, onToggle: (id: string, code: string) => Promise<void>,
+  types: CheckType[], canEdit: boolean, onToggle: (id: string, code: string) => Promise<void>, changedCleanIds: Set<string>,
 }) {
-  return <section className={`front-board ${tone}`}><header><div><span className="front-board-dot" /><div><h2>{title}</h2><p>{subtitle}</p></div></div><div className="front-board-actions"><button onClick={() => printFrontBoard(title, rows, checked)} disabled={!rows.length} title={`Imprimer la liste ${title}`}><Printer size={15} />Imprimer</button><strong>{rows.length}</strong></div></header><div className="front-board-columns"><span>Client</span><span>Préparation accueil</span></div><div className="front-board-list">{rows.map((row) => <FrontRow key={row.id} row={row} checked={checked} types={types} canEdit={canEdit} onToggle={onToggle} />)}{!rows.length && <div className="front-empty">Aucune réservation dans cette liste.</div>}</div></section>
+  const [showPrintOptions, setShowPrintOptions] = useState(false)
+  const [printOptions, setPrintOptions] = useState<FrontPrintOptions>({ sort: 'name', client: true, reservation: true, pitch: true, accommodation: true, clean: true, checks: true })
+  return <section className={`front-board ${tone}`}><header><div><span className="front-board-dot" /><div><h2>{title}</h2><p>{subtitle}</p></div></div><div className="front-board-actions"><div className="front-print-wrap"><button onClick={() => setShowPrintOptions((current) => !current)} disabled={!rows.length} title={`Choisir puis imprimer la liste ${title}`}><Printer size={15} />Imprimer<ChevronDown size={13} /></button>{showPrintOptions && <div className="front-print-options"><strong>Impression</strong><label>Ordre<select value={printOptions.sort} onChange={(event) => setPrintOptions((current) => ({ ...current, sort: event.target.value as 'name' | 'pitch' }))}><option value="name">Nom</option><option value="pitch">Emplacement</option></select></label>{([['client','Client'],['reservation','Réservation'],['pitch','Emplacement'],['accommodation','Hébergement'],['clean','Clean'],['checks','Cases accueil']] as const).map(([key,label]) => <label className="print-check" key={key}><input type="checkbox" checked={printOptions[key]} onChange={() => setPrintOptions((current) => ({ ...current, [key]: !current[key] }))} />{label}</label>)}<button className="print-confirm" onClick={() => { printFrontBoard(title, rows, checked, printOptions); setShowPrintOptions(false) }}><Printer size={14} />Lancer l’impression</button></div>}</div><strong>{rows.length}</strong></div></header><div className="front-board-columns"><span>Client</span><span>Préparation accueil</span></div><div className="front-board-list">{rows.map((row) => <FrontRow key={row.id} row={row} checked={checked} types={types} canEdit={canEdit} onToggle={onToggle} cleanChanged={changedCleanIds.has(row.id)} />)}{!rows.length && <div className="front-empty">Aucune réservation dans cette liste.</div>}</div></section>
 }
-function FrontRow({ row, checked, types, canEdit, onToggle }: { row: Reservation, checked: (id: string, code: string) => boolean, types: CheckType[], canEdit: boolean, onToggle: (id: string, code: string) => Promise<void> }) {
+function FrontRow({ row, checked, types, canEdit, onToggle, cleanChanged }: { row: Reservation, checked: (id: string, code: string) => boolean, types: CheckType[], canEdit: boolean, onToggle: (id: string, code: string) => Promise<void>, cleanChanged: boolean }) {
   const iconByCode: Record<string, React.ReactNode> = { plan: <MapIcon size={14} />, key_ready: <KeyRound size={14} />, sticker: <Tag size={14} />, bracelets: <CircleCheck size={14} />, dog: <Dog size={14} /> }
   const ordered = FRONT_CHECK_CODES.map((code) => types.find((type) => type.code === code)).filter(Boolean) as CheckType[]
   const cleanStatus = row.clean_status ?? 'non_renseigne'
-  return <article className="front-row"><div className="front-client"><div className="avatar">{(row.firstname?.[0] ?? '?').toUpperCase()}{(row.lastname?.[0] ?? '').toUpperCase()}</div><div><h3>{(row.lastname ?? '').toUpperCase()} {row.firstname}</h3><p><Hash size={13} />{row.reservation_number}</p><span><MapPin size={13} />{row.pitch || 'Sans emplacement'} · {row.accommodation_type || 'Hébergement non renseigné'}</span></div></div><div className="front-preparation"><div className={`clean-status ${cleanStatus}`} title="Cet état sera mis à jour automatiquement par le futur fichier"><Sparkles size={14} /><span>Clean</span><strong>{cleanLabel(cleanStatus)}</strong></div><div className="front-checks">{ordered.map((type) => <button key={type.id} disabled={!canEdit} title={canEdit ? type.label : `${type.label} — lecture seule`} className={`front-check ${checked(row.id, type.code) ? 'checked' : ''}`} onClick={() => void onToggle(row.id, type.code)}>{iconByCode[type.code] ?? <Check size={14} />}<span>{type.label}</span>{checked(row.id, type.code) && <Check className="front-check-tick" size={13} />}</button>)}</div></div></article>
+  return <article className={`front-row ${cleanChanged ? 'clean-changed' : ''}`}><div className="front-client"><div className="avatar">{(row.firstname?.[0] ?? '?').toUpperCase()}{(row.lastname?.[0] ?? '').toUpperCase()}</div><div><h3>{(row.lastname ?? '').toUpperCase()} {row.firstname}{cleanChanged && <span className="clean-change-badge" title="L’état Clean a changé lors de la dernière mise à jour"><RefreshCw size={11} />Modifié</span>}</h3><p><Hash size={13} />{row.reservation_number}</p><span><MapPin size={13} />{row.pitch || 'Sans emplacement'} · {row.accommodation_type || 'Hébergement non renseigné'}</span></div></div><div className="front-preparation"><div className={`clean-status ${cleanStatus}`} title="État mis à jour par le tableau des logements"><Sparkles size={14} /><span>Clean</span><strong>{cleanLabel(cleanStatus)}</strong></div><div className="front-checks">{ordered.map((type) => <button key={type.id} disabled={!canEdit} title={canEdit ? type.label : `${type.label} — lecture seule`} className={`front-check ${checked(row.id, type.code) ? 'checked' : ''}`} onClick={() => void onToggle(row.id, type.code)}>{iconByCode[type.code] ?? <Check size={14} />}<span>{type.label}</span>{checked(row.id, type.code) && <Check className="front-check-tick" size={13} />}</button>)}</div></div></article>
 }
 function QuickCheck({ label, checked, onClick, important = false }: { label: string, checked: boolean, onClick: (event: React.MouseEvent<HTMLButtonElement>) => void, important?: boolean }) {
   return <button onClick={onClick} className={`quick-check ${checked ? 'checked' : ''} ${important ? 'important' : ''}`}>{checked ? <Check size={15} /> : <X size={15} />}<span>{label}</span></button>
