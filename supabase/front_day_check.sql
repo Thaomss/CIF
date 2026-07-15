@@ -1,15 +1,32 @@
--- À exécuter une seule fois dans Supabase pour activer le contrôle de journée Front Office.
-alter table public.arrival_days
-  add column if not exists front_clean_initialized boolean not null default false;
-
-alter table public.reservations
-  add column if not exists clean_previous_status text,
-  add column if not exists clean_changed_at timestamptz;
-
-insert into public.check_types (department_id, code, label, description, sort_order, is_required, is_active)
-select d.id, 'day_verified', 'Vérification journée', 'Pochette d’arrivée contrôlée physiquement par le Front Office', 90, false, true
-from public.departments d
-where d.code = 'front_office'
-and not exists (
-  select 1 from public.check_types c where c.department_id = d.id and c.code = 'day_verified'
+-- À exécuter une seule fois dans Supabase pour rendre « Contrôle journée » totalement indépendant du Back Office.
+create table if not exists public.front_day_rows (
+  id uuid primary key default gen_random_uuid(),
+  arrival_day_id uuid not null references public.arrival_days(id) on delete cascade,
+  reservation_number text not null,
+  firstname text,
+  lastname text,
+  accommodation_type text,
+  pitch text,
+  clean_status text not null default 'non_renseigne',
+  clean_previous_status text,
+  clean_changed_at timestamptz,
+  is_verified boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(arrival_day_id, reservation_number)
 );
+
+alter table public.front_day_rows enable row level security;
+
+drop policy if exists "authenticated front day rows read" on public.front_day_rows;
+create policy "authenticated front day rows read" on public.front_day_rows
+for select to authenticated using (true);
+
+drop policy if exists "authenticated front day rows write" on public.front_day_rows;
+create policy "authenticated front day rows write" on public.front_day_rows
+for all to authenticated using (true) with check (true);
+
+do $$ begin
+  alter publication supabase_realtime add table public.front_day_rows;
+exception when duplicate_object then null;
+end $$;

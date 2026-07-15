@@ -6,7 +6,7 @@ import {
 } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import { hasSupabase, supabase } from './supabase'
-import type { ArrivalDay, CallStatus, CheckType, Profile, Reservation, ReservationCheck } from './types'
+import type { ArrivalDay, CallStatus, CheckType, FrontDayRow, Profile, Reservation, ReservationCheck } from './types'
 
 const TECHNICAL_DOMAIN = 'camping.local'
 const FRONT_CHECK_CODES = ['plan', 'key_ready', 'sticker', 'bracelets', 'dog'] as const
@@ -53,7 +53,7 @@ function parseWorkbook(buffer: ArrayBuffer, arrivalDayId: string) {
   return [...unique.values()]
 }
 
-type CleanImportRow = { reservation_number: string, clean_status: string }
+type CleanImportRow = { reservation_number: string, clean_status: string, firstname: string | null, lastname: string | null, accommodation_type: string | null, pitch: string | null }
 const cleanStatusMap: Record<string, string> = {
   CLEAN: 'clean',
   TO_BE_CLEANED: 'to_be_cleaned',
@@ -73,7 +73,7 @@ function parseCleanWorkbook(buffer: ArrayBuffer) {
     const rawStatus = String(getCell(row, ['Cleaning Status', 'Statut nettoyage', 'Etat nettoyage', 'État nettoyage'])).trim().toUpperCase().replace(/[\s-]+/g, '_')
     if (!reservationNumber || !rawStatus) return
     const cleanStatus = cleanStatusMap[rawStatus]
-    if (cleanStatus) unique.set(reservationNumber, { reservation_number: reservationNumber, clean_status: cleanStatus })
+    if (cleanStatus) unique.set(reservationNumber, { reservation_number: reservationNumber, clean_status: cleanStatus, firstname: String(getCell(row, ['Customer First Name', 'Prénom', 'Prenom', 'First Name'])).trim() || null, lastname: String(getCell(row, ['Customer Last Name', 'Nom', 'Last Name'])).trim() || null, accommodation_type: String(getCell(row, ['Accommodation Type', 'Type d hébergement', 'Type hébergement', 'Accommodation'])).trim() || null, pitch: String(getCell(row, ['Unit Name', 'Emplacement', 'Pitch', 'Unit'])).trim() || null })
   })
   return [...unique.values()]
 }
@@ -139,6 +139,7 @@ export default function App() {
   const [cleanTracking, setCleanTracking] = useState(false)
   const [cleanBaselineReady, setCleanBaselineReady] = useState(false)
   const [changedCleanIds, setChangedCleanIds] = useState<Set<string>>(new Set())
+  const [frontDayRows, setFrontDayRows] = useState<FrontDayRow[]>([])
   const fileRef = useRef<HTMLInputElement>(null)
   const cleanFileRef = useRef<HTMLInputElement>(null)
 
@@ -168,6 +169,7 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'arrival_days' }, () => void loadDays(day.id))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'reservations', filter: `arrival_day_id=eq.${day.id}` }, () => void loadRows(day.id))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'reservation_checks' }, () => void loadChecks(rows.map((row) => row.id)))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'front_day_rows', filter: `arrival_day_id=eq.${day.id}` }, () => void loadFrontDayRows(day.id))
       .subscribe()
     return () => { void supabase?.removeChannel(channel) }
   }, [signedIn, day?.id, rows.length])
@@ -202,8 +204,8 @@ export default function App() {
     setDays(nextDays)
     const selected = nextDays.find((item) => item.id === (preferredId ?? day?.id)) ?? nextDays[0] ?? null
     setDay(selected)
-    if (selected) await loadRows(selected.id)
-    else { setRows([]); setChecks({}) }
+    if (selected) { await loadRows(selected.id); await loadFrontDayRows(selected.id) }
+    else { setRows([]); setFrontDayRows([]); setChecks({}) }
   }
   async function loadRows(arrivalDayId: string) {
     if (!supabase) return
@@ -213,6 +215,16 @@ export default function App() {
     setRows(nextRows)
     setChangedCleanIds(new Set(nextRows.filter((row) => Boolean(row.clean_changed_at)).map((row) => row.id)))
     await loadChecks(nextRows.map((row) => row.id))
+  }
+  async function loadFrontDayRows(arrivalDayId: string) {
+    if (!supabase) return
+    const { data, error: loadError } = await supabase.from('front_day_rows').select('*').eq('arrival_day_id', arrivalDayId).order('lastname')
+    if (loadError) {
+      if (loadError.code !== '42P01') setError(loadError.message)
+      setFrontDayRows([])
+      return
+    }
+    setFrontDayRows((data ?? []) as FrontDayRow[])
   }
   async function loadChecks(reservationIds: string[]) {
     if (!supabase || reservationIds.length === 0) { setChecks({}); return }
@@ -225,6 +237,7 @@ export default function App() {
   async function chooseDay(next: ArrivalDay) {
     setDay(next); setExpanded(null); setQuery(''); setFilter('all'); setCallFilter('all'); setVisibleCount(60)
     await loadRows(next.id)
+    await loadFrontDayRows(next.id)
   }
   async function createDay() {
     if (!supabase || !newDate) return
@@ -278,50 +291,59 @@ export default function App() {
   async function importCleanFile(file: File) {
     if (!supabase || !day) return
     setCleanImporting(true); setCleanImportSummary(null)
-    const client = supabase
     try {
       const parsed = parseCleanWorkbook(await file.arrayBuffer())
       if (!parsed.length) throw new Error('Aucun état de nettoyage reconnu. Le fichier doit contenir les colonnes Reservation Number et Cleaning Status.')
-      const byNumber = new Map(rows.map((row) => [row.reservation_number, row]))
-      const matched = parsed.filter((item) => byNumber.has(item.reservation_number))
-      const notFound = parsed.length - matched.length
-      const isFirstImport = !day.front_clean_initialized
-      const changedIds: string[] = []
-
-      if (!isFirstImport) {
-        const { error: clearError } = await client.from('reservations').update({ clean_changed_at: null, clean_previous_status: null }).eq('arrival_day_id', day.id)
-        if (clearError) throw clearError
-      }
-
-      for (let index = 0; index < matched.length; index += 100) {
-        const batch = matched.slice(index, index + 100)
-        await Promise.all(batch.map(async (item) => {
-          const row = byNumber.get(item.reservation_number)
-          if (!row) return
-          const previous = row.clean_status ?? 'non_renseigne'
-          const changed = !isFirstImport && previous !== item.clean_status
-          if (changed) changedIds.push(row.id)
-          const { error: updateError } = await client.from('reservations').update({
-            clean_status: item.clean_status,
-            clean_previous_status: changed ? previous : null,
-            clean_changed_at: changed ? new Date().toISOString() : null,
-            updated_by: profile?.id ?? null,
-          }).eq('id', row.id)
-          if (updateError) throw updateError
-        }))
-      }
+      const existingByNumber = new Map(frontDayRows.map((row) => [row.reservation_number, row]))
+      const isFirstImport = frontDayRows.length === 0
+      let updated = 0
+      let changed = 0
+      let notFound = 0
 
       if (isFirstImport) {
-        const { error: dayError } = await client.from('arrival_days').update({ front_clean_initialized: true }).eq('id', day.id)
-        if (dayError) throw dayError
+        const payload = parsed.map((item) => ({
+          arrival_day_id: day.id,
+          reservation_number: item.reservation_number,
+          firstname: item.firstname,
+          lastname: item.lastname,
+          accommodation_type: item.accommodation_type,
+          pitch: item.pitch,
+          clean_status: item.clean_status,
+          clean_previous_status: null,
+          clean_changed_at: null,
+          is_verified: false,
+        }))
+        for (let index = 0; index < payload.length; index += 100) {
+          const { error: insertError } = await supabase.from('front_day_rows').upsert(payload.slice(index, index + 100), { onConflict: 'arrival_day_id,reservation_number' })
+          if (insertError) throw insertError
+        }
+        updated = payload.length
+      } else {
+        const { error: clearError } = await supabase.from('front_day_rows').update({ clean_previous_status: null, clean_changed_at: null }).eq('arrival_day_id', day.id)
+        if (clearError) throw clearError
+        for (const item of parsed) {
+          const current = existingByNumber.get(item.reservation_number)
+          if (!current) { notFound += 1; continue }
+          const previous = current.clean_status ?? 'non_renseigne'
+          const hasChanged = previous !== item.clean_status
+          const { error: updateError } = await supabase.from('front_day_rows').update({
+            clean_status: item.clean_status,
+            clean_previous_status: hasChanged ? previous : null,
+            clean_changed_at: hasChanged ? new Date().toISOString() : null,
+            updated_at: new Date().toISOString(),
+          }).eq('id', current.id)
+          if (updateError) throw updateError
+          updated += 1
+          if (hasChanged) changed += 1
+        }
       }
-      await loadDays(day.id)
+
+      await loadFrontDayRows(day.id)
       setCleanBaselineReady(true)
       setCleanTracking(true)
-      setChangedCleanIds(new Set(changedIds))
-      setCleanImportSummary({ updated: matched.length, changed: changedIds.length, notFound, ignored: 0 })
+      setCleanImportSummary({ updated, changed, notFound, ignored: 0 })
     } catch (caught) {
-      alert(caught instanceof Error ? caught.message : 'Impossible de mettre à jour les états des logements.')
+      alert(caught instanceof Error ? caught.message : 'Impossible de mettre à jour le contrôle de journée.')
     } finally {
       setCleanImporting(false)
       if (cleanFileRef.current) cleanFileRef.current.value = ''
@@ -330,15 +352,19 @@ export default function App() {
 
   async function resetDayChecks() {
     if (!supabase || !day || !confirm('Remettre toutes les vérifications de la journée à « À vérifier » ?')) return
-    const type = checkTypeByCode.day_verified
-    if (!type) { alert('Exécutez d’abord le fichier supabase/front_day_check.sql dans Supabase.'); return }
-    const { error: resetError } = await supabase.from('reservation_checks').update({ is_checked: false, updated_by: profile?.id ?? null }).eq('check_type_id', type.id).in('reservation_id', rows.map((row) => row.id))
+    const { error: resetError } = await supabase.from('front_day_rows').update({ is_verified: false }).eq('arrival_day_id', day.id)
     if (resetError) { alert(resetError.message); return }
-    setChecks((current) => {
-      const next = { ...current }
-      rows.forEach((row) => { next[`${row.id}:${type.id}`] = false })
-      return next
-    })
+    setFrontDayRows((current) => current.map((row) => ({ ...row, is_verified: false })))
+  }
+
+  async function toggleFrontDayRow(id: string) {
+    if (!supabase) return
+    const row = frontDayRows.find((item) => item.id === id)
+    if (!row) return
+    const next = !row.is_verified
+    setFrontDayRows((current) => current.map((item) => item.id === id ? { ...item, is_verified: next } : item))
+    const { error: updateError } = await supabase.from('front_day_rows').update({ is_verified: next, updated_at: new Date().toISOString() }).eq('id', id)
+    if (updateError) { alert(updateError.message); await loadFrontDayRows(row.arrival_day_id) }
   }
 
   async function addManual() {
@@ -407,13 +433,13 @@ export default function App() {
     </aside>
 
     <main className="content">
-      <header><div><p className="eyebrow">{workspace === 'front' ? 'ACCUEIL DES ARRIVÉES' : workspace === 'front_check' ? 'CONTRÔLE DE LA JOURNÉE' : 'JOURNÉE ACTIVE'}</p><h1>{day?.name ?? 'Aucune journée créée'}</h1><p>{rows.length} réservations{day?.updated_at ? ` · Dernière mise à jour ${new Intl.DateTimeFormat('fr-FR', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(day.updated_at))}` : ''}</p></div>
+      <header><div><p className="eyebrow">{workspace === 'front' ? 'ACCUEIL DES ARRIVÉES' : workspace === 'front_check' ? 'CONTRÔLE DE LA JOURNÉE' : 'JOURNÉE ACTIVE'}</p><h1>{day?.name ?? 'Aucune journée créée'}</h1><p>{workspace === 'front_check' ? frontDayRows.length : rows.length} réservations{day?.updated_at ? ` · Dernière mise à jour ${new Intl.DateTimeFormat('fr-FR', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(day.updated_at))}` : ''}</p></div>
         {workspace === 'back' && canUseBack && <div className="header-actions"><input ref={fileRef} hidden type="file" accept=".xlsx,.xls,.csv" onChange={(e) => e.target.files?.[0] && void importFile(e.target.files[0])} /><button className="secondary" onClick={() => fileRef.current?.click()} disabled={!day || importing}><Upload size={17} />{importing ? 'Mise à jour…' : 'Mettre à jour les arrivées'}</button><button className="primary" onClick={() => void addManual()} disabled={!day}><Plus size={17} />Ajouter une réservation</button><button className="danger-button" onClick={() => void deleteCurrentDay()} disabled={!day}><Trash2 size={17} />Supprimer la journée</button></div>}
       </header>
       {error && <div className="error page-error">{error}</div>}
       {!day ? <div className="empty"><h2>Aucune journée</h2><p>Créez le prochain samedi d’arrivées pour commencer.</p>{canUseBack && <button className="primary" onClick={() => setShowNewDay(true)}><Plus size={17} />Créer une journée</button>}</div> : workspace === 'front' ?
         <FrontOfficeView rows={rows} query={query} setQuery={setQuery} checked={checked} frontCheckTypes={frontCheckTypes} canEdit={canEditFront} onToggle={toggleCheck} changedCleanIds={changedCleanIds} /> : workspace === 'front_check' ?
-        <FrontDayCheckView rows={rows} query={query} setQuery={setQuery} checked={checked} canEdit={canEditFront} onToggle={toggleCheck} cleanFileRef={cleanFileRef} cleanImporting={cleanImporting} onCleanImport={importCleanFile} initialized={Boolean(day.front_clean_initialized)} changedCleanIds={changedCleanIds} onResetChecks={resetDayChecks} /> :
+        <FrontDayCheckView rows={frontDayRows} query={query} setQuery={setQuery} canEdit={canEditFront} onToggle={toggleFrontDayRow} cleanFileRef={cleanFileRef} cleanImporting={cleanImporting} onCleanImport={importCleanFile} initialized={frontDayRows.length > 0} onResetChecks={resetDayChecks} /> :
         <>
           <section className="progress-card"><div><span>Avancement de la préparation</span><strong>{counts.ready} / {rows.length} réservations prêtes</strong></div><div className="progress-value">{progress}%</div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div></section>
           <section className="stats"><button onClick={() => setFilter('all')} className={filter === 'all' ? 'selected' : ''}><strong>{rows.length}</strong><span>Toutes</span></button><button onClick={() => setFilter('ready')} className={filter === 'ready' ? 'selected green-card' : ''}><strong>{counts.ready}</strong><span>CIF prêts</span></button><button onClick={() => setFilter('todo')} className={filter === 'todo' ? 'selected orange-card' : ''}><strong>{counts.todo}</strong><span>À préparer</span></button><button onClick={() => setFilter('call')} className={filter === 'call' ? 'selected' : ''}><strong>{counts.call}</strong><span>Suivi appel</span></button><button onClick={() => setFilter('due')} className={filter === 'due' ? 'selected' : ''}><strong>{counts.due}</strong><span>Avec solde</span></button></section>
@@ -508,36 +534,42 @@ function FrontOfficeView({ rows, query, setQuery, checked, frontCheckTypes, canE
     </div>
   </div>
 }
-function FrontDayCheckView({ rows, query, setQuery, checked, canEdit, onToggle, cleanFileRef, cleanImporting, onCleanImport, initialized, changedCleanIds, onResetChecks }: {
-  rows: Reservation[], query: string, setQuery: (value: string) => void, checked: (id: string, code: string) => boolean,
-  canEdit: boolean, onToggle: (id: string, code: string) => Promise<void>, cleanFileRef: React.RefObject<HTMLInputElement>,
-  cleanImporting: boolean, onCleanImport: (file: File) => Promise<void>, initialized: boolean, changedCleanIds: Set<string>, onResetChecks: () => Promise<void>,
+function sortFrontDayRows(rows: FrontDayRow[], sort: 'name' | 'pitch') {
+  return [...rows].sort((a, b) => sort === 'pitch'
+    ? String(a.pitch ?? '').localeCompare(String(b.pitch ?? ''), 'fr', { numeric: true }) || `${a.lastname ?? ''} ${a.firstname ?? ''}`.localeCompare(`${b.lastname ?? ''} ${b.firstname ?? ''}`, 'fr')
+    : `${a.lastname ?? ''} ${a.firstname ?? ''}`.localeCompare(`${b.lastname ?? ''} ${b.firstname ?? ''}`, 'fr'))
+}
+function FrontDayCheckView({ rows, query, setQuery, canEdit, onToggle, cleanFileRef, cleanImporting, onCleanImport, initialized, onResetChecks }: {
+  rows: FrontDayRow[], query: string, setQuery: (value: string) => void,
+  canEdit: boolean, onToggle: (id: string) => Promise<void>, cleanFileRef: React.RefObject<HTMLInputElement>,
+  cleanImporting: boolean, onCleanImport: (file: File) => Promise<void>, initialized: boolean, onResetChecks: () => Promise<void>,
 }) {
   const [sort, setSort] = useState<'name' | 'pitch'>('pitch')
   const [view, setView] = useState<'all' | 'todo' | 'done' | 'changed'>('all')
   const needle = query.trim().toLocaleLowerCase('fr')
-  const filtered = useMemo(() => sortFrontRows(rows.filter((row) => {
+  const changedCount = rows.filter((row) => Boolean(row.clean_changed_at)).length
+  const filtered = useMemo(() => sortFrontDayRows(rows.filter((row) => {
     const searchMatch = !needle || [row.firstname, row.lastname, row.reservation_number, row.pitch, row.accommodation_type].some((value) => String(value ?? '').toLocaleLowerCase('fr').includes(needle))
-    const ok = checked(row.id, 'day_verified')
-    const viewMatch = view === 'all' || (view === 'todo' && !ok) || (view === 'done' && ok) || (view === 'changed' && changedCleanIds.has(row.id))
+    const viewMatch = view === 'all' || (view === 'todo' && !row.is_verified) || (view === 'done' && row.is_verified) || (view === 'changed' && Boolean(row.clean_changed_at))
     return searchMatch && viewMatch
-  }), sort), [rows, needle, view, sort, checked, changedCleanIds])
-  const doneCount = rows.filter((row) => checked(row.id, 'day_verified')).length
+  }), sort), [rows, needle, sort, view])
+  const doneCount = rows.filter((row) => row.is_verified).length
   return <div className="day-check-workspace">
-    <section className="day-check-hero"><div><span>Contrôle physique des pochettes</span><strong>{doneCount} / {rows.length} vérifiées</strong><p>{initialized ? 'Les prochaines mises à jour signaleront clairement les changements de statut Clean.' : 'Importez le tableau du jour pour créer le point de départ des statuts Clean.'}</p></div><div className="day-check-actions">
+    <section className="day-check-hero"><div><span>Contrôle physique des pochettes</span><strong>{doneCount} / {rows.length} vérifiées</strong><p>{initialized ? 'Cette liste est indépendante du Back Office. Les prochains fichiers mettront uniquement à jour les statuts Clean par numéro de réservation.' : 'Importez le tableau du jour pour créer cette liste indépendante.'}</p></div><div className="day-check-actions">
       <input ref={cleanFileRef} hidden type="file" accept=".xlsx,.xls,.csv" onChange={(event) => event.target.files?.[0] && void onCleanImport(event.target.files[0])} />
       <button className="primary" disabled={!canEdit || cleanImporting} onClick={() => cleanFileRef.current?.click()}><Upload size={16} />{cleanImporting ? 'Mise à jour…' : initialized ? 'Mettre à jour les statuts' : 'Importer le tableau du jour'}</button>
       <button className="secondary" disabled={!canEdit || !doneCount} onClick={() => void onResetChecks()}><RefreshCw size={16} />Réinitialiser les OK</button>
     </div></section>
-    {changedCleanIds.size > 0 && <div className="day-check-alert"><RefreshCw size={17} /><strong>{changedCleanIds.size} logement{changedCleanIds.size > 1 ? 's ont' : ' a'} changé de statut depuis la dernière mise à jour.</strong><button onClick={() => setView('changed')}>Les afficher</button></div>}
-    <section className="day-check-toolbar"><div className="day-check-filters"><button className={view === 'all' ? 'active' : ''} onClick={() => setView('all')}>Tous <strong>{rows.length}</strong></button><button className={view === 'todo' ? 'active' : ''} onClick={() => setView('todo')}>À vérifier <strong>{rows.length - doneCount}</strong></button><button className={view === 'done' ? 'active' : ''} onClick={() => setView('done')}>OK <strong>{doneCount}</strong></button><button className={`changed ${view === 'changed' ? 'active' : ''}`} onClick={() => setView('changed')}>Modifiés <strong>{changedCleanIds.size}</strong></button></div><label><ArrowUpDown size={15} /><select value={sort} onChange={(event) => setSort(event.target.value as 'name' | 'pitch')}><option value="pitch">Emplacement</option><option value="name">Nom</option></select></label><div className="front-search"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Nom, réservation ou emplacement…" /></div></section>
-    <section className="day-check-list"><div className="day-check-columns"><span>Client et emplacement</span><span>État du logement</span><span>Contrôle pochette</span></div>{filtered.map((row) => <DayCheckRow key={row.id} row={row} isOk={checked(row.id, 'day_verified')} canEdit={canEdit} changed={changedCleanIds.has(row.id)} onToggle={() => onToggle(row.id, 'day_verified')} />)}{!filtered.length && <div className="front-empty">Aucune réservation ne correspond à ce filtre.</div>}</section>
+    {changedCount > 0 && <div className="day-check-alert"><RefreshCw size={17} /><strong>{changedCount} logement{changedCount > 1 ? 's ont' : ' a'} changé de statut depuis la dernière mise à jour.</strong><button onClick={() => setView('changed')}>Les afficher</button></div>}
+    <section className="day-check-toolbar"><div className="day-check-filters"><button className={view === 'all' ? 'active' : ''} onClick={() => setView('all')}>Tous <strong>{rows.length}</strong></button><button className={view === 'todo' ? 'active' : ''} onClick={() => setView('todo')}>À vérifier <strong>{rows.length - doneCount}</strong></button><button className={view === 'done' ? 'active' : ''} onClick={() => setView('done')}>OK <strong>{doneCount}</strong></button><button className={`changed ${view === 'changed' ? 'active' : ''}`} onClick={() => setView('changed')}>Modifiés <strong>{changedCount}</strong></button></div><label><ArrowUpDown size={15} /><select value={sort} onChange={(event) => setSort(event.target.value as 'name' | 'pitch')}><option value="pitch">Emplacement</option><option value="name">Nom</option></select></label><div className="front-search"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Nom, réservation ou emplacement…" /></div></section>
+    <section className="day-check-list"><div className="day-check-columns"><span>Client et emplacement</span><span>État du logement</span><span>Contrôle pochette</span></div>{filtered.map((row) => <DayCheckRow key={row.id} row={row} canEdit={canEdit} onToggle={() => onToggle(row.id)} />)}{!filtered.length && <div className="front-empty">Aucune réservation ne correspond à ce filtre.</div>}</section>
   </div>
 }
-function DayCheckRow({ row, isOk, canEdit, changed, onToggle }: { row: Reservation, isOk: boolean, canEdit: boolean, changed: boolean, onToggle: () => Promise<void> }) {
+function DayCheckRow({ row, canEdit, onToggle }: { row: FrontDayRow, canEdit: boolean, onToggle: () => Promise<void> }) {
   const status = row.clean_status ?? 'non_renseigne'
   const previous = row.clean_previous_status ?? 'non_renseigne'
-  return <article className={`day-check-row ${isOk ? 'is-ok' : ''} ${changed ? 'is-changed' : ''}`}><div className="day-check-client"><div className="avatar">{(row.firstname?.[0] ?? '?').toUpperCase()}{(row.lastname?.[0] ?? '').toUpperCase()}</div><div><h3>{(row.lastname ?? '').toUpperCase()} {row.firstname}</h3><p><Hash size={13} />{row.reservation_number}</p><span><MapPin size={13} />{row.pitch || 'Sans emplacement'} · {row.accommodation_type || 'Hébergement non renseigné'}</span></div></div><div className="day-check-clean">{changed && <span className="status-change-label"><RefreshCw size={12} />Changement détecté</span>}<div className={`clean-status ${status}`}><Sparkles size={14} /><span>Clean</span><strong>{cleanLabel(status)}</strong></div>{changed && <small>{cleanLabel(previous)} <ChevronRight size={12} /> <strong>{cleanLabel(status)}</strong></small>}</div><button disabled={!canEdit} className={`day-ok-button ${isOk ? 'checked' : ''}`} onClick={() => void onToggle()}>{isOk ? <CircleCheck size={20} /> : <span className="empty-check" />}<span>{isOk ? 'Vérifié' : 'Marquer OK'}</span></button></article>
+  const changed = Boolean(row.clean_changed_at)
+  return <article className={`day-check-row ${row.is_verified ? 'is-ok' : ''} ${changed ? 'is-changed' : ''}`}><div className="day-check-client"><div className="avatar">{(row.firstname?.[0] ?? '?').toUpperCase()}{(row.lastname?.[0] ?? '').toUpperCase()}</div><div><h3>{(row.lastname ?? '').toUpperCase()} {row.firstname}</h3><p><Hash size={13} />{row.reservation_number}</p><span><MapPin size={13} />{row.pitch || 'Sans emplacement'} · {row.accommodation_type || 'Hébergement non renseigné'}</span></div></div><div className="day-check-clean">{changed && <span className="status-change-label"><RefreshCw size={12} />Changement détecté</span>}<div className={`clean-status ${status}`}><Sparkles size={14} /><span>Clean</span><strong>{cleanLabel(status)}</strong></div>{changed && <small>{cleanLabel(previous)} <ChevronRight size={12} /> <strong>{cleanLabel(status)}</strong></small>}</div><button disabled={!canEdit} className={`day-ok-button ${row.is_verified ? 'checked' : ''}`} onClick={() => void onToggle()}>{row.is_verified ? <CircleCheck size={20} /> : <span className="empty-check" />}<span>{row.is_verified ? 'Vérifié' : 'Marquer OK'}</span></button></article>
 }
 
 function FrontBoard({ title, subtitle, tone, rows, checked, types, canEdit, onToggle, changedCleanIds }: {

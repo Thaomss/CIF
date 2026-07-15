@@ -64,3 +64,20 @@ export type ReservationCheck = {
   is_checked: boolean
   updated_at?: string
 }
+
+
+export type FrontDayRow = {
+  id: string
+  arrival_day_id: string
+  reservation_number: string
+  firstname: string | null
+  lastname: string | null
+  accommodation_type: string | null
+  pitch: string | null
+  clean_status: string | null
+  clean_previous_status: string | null
+  clean_changed_at: string | null
+  is_verified: boolean
+  created_at?: string
+  updated_at?: string
+}
