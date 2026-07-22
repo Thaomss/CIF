@@ -11,10 +11,10 @@ import type { ArrivalDay, CallStatus, CheckType, FrontDayRow, Profile, Reservati
 const TECHNICAL_DOMAIN = 'camping.local'
 const FRONT_CHECK_CODES = ['key_sticker', 'dog', 'plan', 'bracelets', 'verification'] as const
 const statusLabels: Record<CallStatus, string> = {
-  a_appeler: 'À appeler', message_laisse: 'Message laissé', a_rappeler: 'À rappeler', attente_client: 'En attente client', termine: 'Terminé',
+  a_appeler: 'À appeler', message_laisse: 'Message laissé', a_rappeler: 'À rappeler', attente_client: 'En attente client', termine: 'Terminé', cif_pas_possible: 'CIF pas possible',
 }
 const statusClass: Record<CallStatus, string> = {
-  a_appeler: 'amber', message_laisse: 'purple', a_rappeler: 'orange', attente_client: 'blue', termine: 'green',
+  a_appeler: 'amber', message_laisse: 'purple', a_rappeler: 'orange', attente_client: 'blue', termine: 'green', cif_pas_possible: 'red',
 }
 
 function normalizeHeader(value: string) {
@@ -256,7 +256,23 @@ export default function App() {
     if (!supabase) return
     setRows((current) => current.map((row) => row.id === id ? { ...row, ...changes } : row)); setSaving(id)
     const { error: updateError } = await supabase.from('reservations').update({ ...changes, updated_by: profile?.id ?? null }).eq('id', id)
-    if (updateError) { alert(updateError.message); if (day) await loadRows(day.id) }
+    if (updateError) { alert(updateError.message); if (day) await loadRows(day.id); setSaving(null); return }
+
+    // « CIF pas possible » doit toujours apparaître dans « CIF pas OK » côté Front Office.
+    if (changes.call_status === 'cif_pas_possible') {
+      const cifReadyType = checkTypeByCode.cif_ready
+      if (cifReadyType) {
+        const key = `${id}:${cifReadyType.id}`
+        setChecks((current) => ({ ...current, [key]: false }))
+        const { error: checkError } = await supabase.from('reservation_checks').upsert({
+          reservation_id: id,
+          check_type_id: cifReadyType.id,
+          is_checked: false,
+          updated_by: profile?.id ?? null,
+        }, { onConflict: 'reservation_id,check_type_id' })
+        if (checkError) { alert(checkError.message); if (day) await loadRows(day.id) }
+      }
+    }
     setSaving(null)
   }
   async function toggleCheck(reservationId: string, code: string) {
@@ -441,7 +457,7 @@ export default function App() {
   }), [rows, checks, checkTypes])
   const progress = rows.length ? Math.round((counts.ready / rows.length) * 100) : 0
   const callCounts = useMemo(() => {
-    const next: Record<'unset' | CallStatus, number> = { unset: 0, a_appeler: 0, message_laisse: 0, a_rappeler: 0, attente_client: 0, termine: 0 }
+    const next: Record<'unset' | CallStatus, number> = { unset: 0, a_appeler: 0, message_laisse: 0, a_rappeler: 0, attente_client: 0, termine: 0, cif_pas_possible: 0 }
     rows.forEach((row) => row.call_status ? next[row.call_status] += 1 : next.unset += 1)
     return next
   }, [rows])
@@ -569,8 +585,8 @@ function FrontOfficeView({ rows, query, setQuery, checked, frontCheckTypes, canE
   const [frontSort, setFrontSort] = useState<'name' | 'pitch'>('name')
   const needle = query.trim().toLocaleLowerCase('fr')
   const searched = useMemo(() => sortFrontRows(rows.filter((row) => !needle || [row.firstname, row.lastname, row.reservation_number, row.pitch, row.accommodation_type].some((value) => String(value ?? '').toLocaleLowerCase('fr').includes(needle))), frontSort), [rows, needle, frontSort])
-  const ready = searched.filter((row) => checked(row.id, 'cif_ready'))
-  const notReady = searched.filter((row) => !checked(row.id, 'cif_ready'))
+  const ready = searched.filter((row) => row.call_status !== 'cif_pas_possible' && checked(row.id, 'cif_ready'))
+  const notReady = searched.filter((row) => row.call_status === 'cif_pas_possible' || !checked(row.id, 'cif_ready'))
   const setupMissing = FRONT_CHECK_CODES.some((code) => !frontCheckTypes.some((type) => type.code === code)) || rows.some((row) => !('clean_status' in row))
   return <div className="front-workspace">
     <section className="front-hero"><div><span>Suivi accueil en temps réel</span><strong>{ready.length} CIF prêts · {notReady.length} CIF pas OK</strong></div><div className="front-hero-actions">

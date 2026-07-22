@@ -1,5 +1,5 @@
 export type AppRole = 'admin' | 'back_office' | 'front_office' | 'direction'
-export type CallStatus = 'a_appeler' | 'message_laisse' | 'a_rappeler' | 'attente_client' | 'termine'
+export type CallStatus = 'a_appeler' | 'message_laisse' | 'a_rappeler' | 'attente_client' | 'termine' | 'cif_pas_possible'
 
 export type Profile = {
   id: string
