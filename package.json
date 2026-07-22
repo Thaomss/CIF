@@ -1,21 +1,13 @@
-{
-  "name": "camping-cif-backoffice",
-  "private": true,
-  "version": "0.1.0",
-  "type": "module",
-  "scripts": {"dev":"vite","build":"tsc -b && vite build","preview":"vite preview"},
-  "dependencies": {
-    "@supabase/supabase-js": "^2.52.0",
-    "lucide-react": "^0.468.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "xlsx": "^0.18.5"
-  },
-  "devDependencies": {
-    "@types/react": "^18.3.18",
-    "@types/react-dom": "^18.3.5",
-    "@vitejs/plugin-react": "^4.3.4",
-    "typescript": "^5.7.2",
-    "vite": "^6.0.5"
-  }
-}
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0f766e" />
+    <title>CIF Camping</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,7 +1,1 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-
-export default defineConfig({
-  plugins: [react()],
-  base: './',
-})
+{"compilerOptions":{"composite":true,"skipLibCheck":true,"module":"ESNext","moduleResolution":"Bundler","allowImportingTsExtensions":true,"noEmit":true},"include":["vite.config.ts"]}
