@@ -21,14 +21,14 @@ insert into public.check_types (department_id, code, label, description, sort_or
 select d.id, v.code, v.label, v.description, v.sort_order, false, true
 from public.departments d
 cross join (values
-  ('plan', 'Plan', 'Plan remis au client.', 20),
-  ('key_ready', 'Clé', 'Clé préparée ou remise.', 30),
-  ('sticker', 'Macaron', 'Macaron véhicule préparé ou remis.', 40),
+  ('key_sticker', 'Clé + macaron', 'Clé et macaron préparés ou remis.', 20),
+  ('dog', 'Chien', 'Présence d’un chien prise en compte.', 30),
+  ('plan', 'Plan', 'Plan préparé ou remis.', 40),
   ('bracelets', 'Bracelets', 'Bracelets préparés ou remis.', 50),
-  ('dog', 'Chien', 'Présence d’un chien prise en compte.', 60)
+  ('verification', 'Vérification', 'Vérification finale de la pochette.', 60)
 ) as v(code, label, description, sort_order)
 where d.code = 'front_office'
 and not exists (select 1 from public.check_types c where c.code = v.code);
 
-update public.check_types set is_active = true where code in ('plan','key_ready','sticker','bracelets','dog');
+update public.check_types set is_active = true where code in ('key_sticker','dog','plan','bracelets','verification');
 update public.profiles set role = 'front_office' where username = 'frontoffice';
