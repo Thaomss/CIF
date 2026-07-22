@@ -444,3 +444,8 @@ header::after{content:"";position:absolute;left:0;right:0;bottom:-11px;height:1p
 .row-call-status.red{background:#fff0f0;border-color:#efbcbc;color:#963535}
 .call-status-menu button.red:hover,.call-status-menu button.red.selected{background:#fff0f0;color:#963535}
 .status-picker .red.on{background:#fff0f0}
+
+/* Statut CIF impossible */
+.reservation.is-impossible{border-left:4px solid #dc2626}
+.reservation.is-impossible .status-dot{background:#dc2626}
+.state-pill.impossible{background:#fee2e2;color:#b91c1c;border:1px solid #fecaca}
