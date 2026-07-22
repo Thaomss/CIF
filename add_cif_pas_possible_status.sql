@@ -1,52 +1,36 @@
--- À exécuter dans Supabase > SQL Editor
-create extension if not exists pgcrypto;
-
-create table if not exists public.arrival_sessions (
+-- À exécuter une seule fois dans Supabase pour rendre « Contrôle journée » totalement indépendant du Back Office.
+create table if not exists public.front_day_rows (
   id uuid primary key default gen_random_uuid(),
-  name text not null,
-  arrival_date date not null,
-  archived boolean not null default false,
-  created_at timestamptz not null default now()
-);
-
-create table if not exists public.reservations (
-  id uuid primary key default gen_random_uuid(),
-  session_id uuid not null references public.arrival_sessions(id) on delete cascade,
+  arrival_day_id uuid not null references public.arrival_days(id) on delete cascade,
   reservation_number text not null,
-  first_name text not null default '',
-  last_name text not null default '',
-  distribution_channel text not null default '',
-  due_amount numeric(10,2) not null default 0,
-  accommodation_type text not null default '',
-  unit_name text not null default '',
-  swikly_ok boolean not null default false,
-  travel_party_ok boolean not null default false,
-  cif_ready boolean not null default false,
-  call_status text not null default 'a_appeler' check (call_status in ('a_appeler','message_laisse','a_rappeler','attente_client','termine')),
-  note text not null default '',
-  is_manual boolean not null default false,
+  firstname text,
+  lastname text,
+  accommodation_type text,
+  pitch text,
+  clean_status text not null default 'non_renseigne',
+  clean_previous_status text,
+  clean_changed_at timestamptz,
+  is_verified boolean not null default false,
+  is_last_minute boolean not null default false,
+  created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique(session_id,reservation_number)
+  unique(arrival_day_id, reservation_number)
 );
 
-create or replace function public.set_updated_at() returns trigger language plpgsql as $$
-begin new.updated_at = now(); return new; end $$;
-drop trigger if exists reservations_updated_at on public.reservations;
-create trigger reservations_updated_at before update on public.reservations for each row execute function public.set_updated_at();
+alter table public.front_day_rows enable row level security;
 
-alter table public.arrival_sessions enable row level security;
-alter table public.reservations enable row level security;
+drop policy if exists "authenticated front day rows read" on public.front_day_rows;
+create policy "authenticated front day rows read" on public.front_day_rows
+for select to authenticated using (true);
 
--- Tous les comptes connectés peuvent lire et modifier les données métier.
-create policy "authenticated sessions read" on public.arrival_sessions for select to authenticated using (true);
-create policy "authenticated sessions write" on public.arrival_sessions for all to authenticated using (true) with check (true);
-create policy "authenticated reservations read" on public.reservations for select to authenticated using (true);
-create policy "authenticated reservations write" on public.reservations for all to authenticated using (true) with check (true);
+drop policy if exists "authenticated front day rows write" on public.front_day_rows;
+create policy "authenticated front day rows write" on public.front_day_rows
+for all to authenticated using (true) with check (true);
 
--- Nécessaire pour recevoir les changements en direct.
-alter publication supabase_realtime add table public.reservations;
+do $$ begin
+  alter publication supabase_realtime add table public.front_day_rows;
+exception when duplicate_object then null;
+end $$;
 
-insert into public.arrival_sessions(name,arrival_date)
-select 'Arrivées du 10 juillet 2026','2026-07-10'
-where not exists (select 1 from public.arrival_sessions);
-
+-- Mise à niveau si la table existait déjà avant l'ajout des Last minute.
+alter table public.front_day_rows add column if not exists is_last_minute boolean not null default false;
