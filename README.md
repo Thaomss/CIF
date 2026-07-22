@@ -1,34 +1,61 @@
--- À exécuter UNE SEULE FOIS dans Supabase > SQL Editor.
--- Transforme Clean en état alimenté par le futur fichier Front Office.
+# CIF Camping
 
-alter table public.reservations
-  add column if not exists clean_status text not null default 'non_renseigne';
+Application interne React/Vite reliée à Supabase pour gérer les arrivées, le Back Office et le Front Office.
 
-comment on column public.reservations.clean_status is
-  'État Clean provenant du fichier Front Office : non_renseigne, propre, a_controler, en_cours, non_propre ou valeur métier importée.';
+## Mise en ligne sur GitHub Pages
 
--- Clean n'est plus une case manuelle.
-update public.check_types
-set is_active = false
-where code = 'clean';
+### 1. Créer le dépôt
 
--- Conserve/ajoute les cinq contrôles manuels du Front Office.
-insert into public.departments (code, name)
-select 'front_office', 'Front Office'
-where not exists (select 1 from public.departments where code = 'front_office');
+Crée un nouveau dépôt GitHub, puis ajoute tout le contenu de ce dossier à la racine du dépôt. La branche principale doit s'appeler `main`.
 
-insert into public.check_types (department_id, code, label, description, sort_order, is_required, is_active)
-select d.id, v.code, v.label, v.description, v.sort_order, false, true
-from public.departments d
-cross join (values
-  ('key_sticker', 'Clé + macaron', 'Clé et macaron préparés ou remis.', 20),
-  ('dog', 'Chien', 'Présence d’un chien prise en compte.', 30),
-  ('plan', 'Plan', 'Plan préparé ou remis.', 40),
-  ('bracelets', 'Bracelets', 'Bracelets préparés ou remis.', 50),
-  ('verification', 'Vérification', 'Vérification finale de la pochette.', 60)
-) as v(code, label, description, sort_order)
-where d.code = 'front_office'
-and not exists (select 1 from public.check_types c where c.code = v.code);
+### 2. Ajouter les deux informations Supabase
 
-update public.check_types set is_active = true where code in ('key_sticker','dog','plan','bracelets','verification');
-update public.profiles set role = 'front_office' where username = 'frontoffice';
+Dans le dépôt GitHub :
+
+`Settings` → `Secrets and variables` → `Actions` → `New repository secret`
+
+Ajoute exactement ces deux secrets :
+
+- `VITE_SUPABASE_URL` : l'adresse de ton projet Supabase
+- `VITE_SUPABASE_ANON_KEY` : la clé publique `anon` de Supabase
+
+Ne mets jamais la clé `service_role`, le mot de passe de la base ou une clé secrète dans GitHub.
+
+### 3. Activer GitHub Pages
+
+Dans le dépôt :
+
+`Settings` → `Pages` → `Build and deployment` → `Source` → `GitHub Actions`
+
+### 4. Lancer la mise en ligne
+
+Une fois les fichiers envoyés sur la branche `main`, l'onglet `Actions` lance automatiquement le déploiement. Les mises à jour suivantes se feront simplement en remplaçant les fichiers puis en validant les changements sur `main`.
+
+## Utilisation locale
+
+Copie `.env.example` en `.env`, puis remplace les valeurs par celles de ton projet Supabase.
+
+```powershell
+npm install
+npm run dev
+```
+
+## Base Supabase
+
+Les scripts SQL nécessaires sont dans le dossier `supabase`. Exécute uniquement ceux qui n'ont pas encore été appliqués à ta base.
+
+## Mise à jour des logements — Front Office
+
+Dans l’espace Front Office, le bouton **Mettre à jour les logements** lit un fichier Excel contenant au minimum les colonnes `Reservation Number` et `Cleaning Status`.
+
+Le rapprochement se fait uniquement avec le numéro de réservation de la journée active. Cette action ne modifie ni les informations de réservation, ni les coches, notes ou statuts du Back Office.
+
+États reconnus : `CLEAN`, `TO_BE_CLEANED`, `IN_PROGRESS`, `POSTPONED`, `TO_BE_CHECKED`, `CHECKED` et `TOUCH_UP`.
+
+## Contrôle journée Front Office
+
+Avant la première utilisation du nouvel écran **Contrôle journée**, exécuter une seule fois dans Supabase SQL Editor :
+
+`supabase/front_day_check.sql`
+
+Cet écran permet d'importer le tableau des logements comme point de départ, de cocher chaque pochette vérifiée et de repérer les changements de statut Clean lors des mises à jour suivantes.
