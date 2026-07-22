@@ -1,34 +1,36 @@
--- À exécuter UNE SEULE FOIS dans Supabase > SQL Editor.
--- Transforme Clean en état alimenté par le futur fichier Front Office.
+-- À exécuter une seule fois dans Supabase pour rendre « Contrôle journée » totalement indépendant du Back Office.
+create table if not exists public.front_day_rows (
+  id uuid primary key default gen_random_uuid(),
+  arrival_day_id uuid not null references public.arrival_days(id) on delete cascade,
+  reservation_number text not null,
+  firstname text,
+  lastname text,
+  accommodation_type text,
+  pitch text,
+  clean_status text not null default 'non_renseigne',
+  clean_previous_status text,
+  clean_changed_at timestamptz,
+  is_verified boolean not null default false,
+  is_last_minute boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(arrival_day_id, reservation_number)
+);
 
-alter table public.reservations
-  add column if not exists clean_status text not null default 'non_renseigne';
+alter table public.front_day_rows enable row level security;
 
-comment on column public.reservations.clean_status is
-  'État Clean provenant du fichier Front Office : non_renseigne, propre, a_controler, en_cours, non_propre ou valeur métier importée.';
+drop policy if exists "authenticated front day rows read" on public.front_day_rows;
+create policy "authenticated front day rows read" on public.front_day_rows
+for select to authenticated using (true);
 
--- Clean n'est plus une case manuelle.
-update public.check_types
-set is_active = false
-where code = 'clean';
+drop policy if exists "authenticated front day rows write" on public.front_day_rows;
+create policy "authenticated front day rows write" on public.front_day_rows
+for all to authenticated using (true) with check (true);
 
--- Conserve/ajoute les cinq contrôles manuels du Front Office.
-insert into public.departments (code, name)
-select 'front_office', 'Front Office'
-where not exists (select 1 from public.departments where code = 'front_office');
+do $$ begin
+  alter publication supabase_realtime add table public.front_day_rows;
+exception when duplicate_object then null;
+end $$;
 
-insert into public.check_types (department_id, code, label, description, sort_order, is_required, is_active)
-select d.id, v.code, v.label, v.description, v.sort_order, false, true
-from public.departments d
-cross join (values
-  ('key_sticker', 'Clé + macaron', 'Clé et macaron préparés ou remis.', 20),
-  ('dog', 'Chien', 'Présence d’un chien prise en compte.', 30),
-  ('plan', 'Plan', 'Plan préparé ou remis.', 40),
-  ('bracelets', 'Bracelets', 'Bracelets préparés ou remis.', 50),
-  ('verification', 'Vérification', 'Vérification finale de la pochette.', 60)
-) as v(code, label, description, sort_order)
-where d.code = 'front_office'
-and not exists (select 1 from public.check_types c where c.code = v.code);
-
-update public.check_types set is_active = true where code in ('key_sticker','dog','plan','bracelets','verification');
-update public.profiles set role = 'front_office' where username = 'frontoffice';
+-- Mise à niveau si la table existait déjà avant l'ajout des Last minute.
+alter table public.front_day_rows add column if not exists is_last_minute boolean not null default false;

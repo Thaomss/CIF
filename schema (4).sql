@@ -1,4 +1,5 @@
--- À exécuter une seule fois dans Supabase > SQL Editor
--- Ajoute la date de départ aux réservations existantes sans supprimer aucune donnée.
-alter table public.reservations
-add column if not exists departure_date date;
+import React from 'react'
+import ReactDOM from 'react-dom/client'
+import App from './App'
+import './styles.css'
+ReactDOM.createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>)
