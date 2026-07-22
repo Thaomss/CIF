@@ -310,6 +310,31 @@ export default function App() {
     const { error: updateError } = await supabase.from('reservation_checks').upsert({ reservation_id: reservationId, check_type_id: type.id, is_checked: nextValue, updated_by: profile?.id ?? null }, { onConflict: 'reservation_id,check_type_id' })
     if (updateError) { alert(updateError.message); setChecks((current) => ({ ...current, [key]: !nextValue })) }
   }
+  async function setChecksBulk(reservationIds: string[], code: string, isChecked: boolean) {
+    if (!supabase || reservationIds.length === 0) return
+    const type = checkTypeByCode[code]
+    if (!type) return
+    const uniqueIds = [...new Set(reservationIds)]
+    const changedIds = uniqueIds.filter((reservationId) => Boolean(checks[`${reservationId}:${type.id}`]) !== isChecked)
+    if (changedIds.length === 0) return
+    const previousValues = Object.fromEntries(changedIds.map((reservationId) => [`${reservationId}:${type.id}`, Boolean(checks[`${reservationId}:${type.id}`])]))
+    setChecks((current) => {
+      const next = { ...current }
+      for (const reservationId of changedIds) next[`${reservationId}:${type.id}`] = isChecked
+      return next
+    })
+    try {
+      const payload = changedIds.map((reservationId) => ({ reservation_id: reservationId, check_type_id: type.id, is_checked: isChecked, updated_by: profile?.id ?? null }))
+      for (let index = 0; index < payload.length; index += 100) {
+        const { error: updateError } = await supabase.from('reservation_checks').upsert(payload.slice(index, index + 100), { onConflict: 'reservation_id,check_type_id' })
+        if (updateError) throw updateError
+      }
+    } catch (caught) {
+      setChecks((current) => ({ ...current, ...previousValues }))
+      alert(describeError(caught, 'Impossible de mettre à jour les réservations sélectionnées.'))
+      throw caught
+    }
+  }
   async function importFile(file: File) {
     if (!supabase || !day) return
     setImporting(true); setImportSummary(null)
@@ -529,7 +554,7 @@ export default function App() {
       </header>
       {error && <div className="error page-error">{error}</div>}
       {!day ? <div className="empty"><h2>Aucune journée</h2><p>Créez le prochain samedi d’arrivées pour commencer.</p>{canUseBack && <button className="primary" onClick={() => setShowNewDay(true)}><Plus size={17} />Créer une journée</button>}</div> : workspace === 'front' ?
-        <FrontOfficeView rows={rows} query={query} setQuery={setQuery} checked={checked} frontCheckTypes={frontCheckTypes} canEdit={canEditFront} onToggle={toggleCheck} changedCleanIds={changedCleanIds} /> : workspace === 'front_check' ?
+        <FrontOfficeView rows={rows} query={query} setQuery={setQuery} checked={checked} frontCheckTypes={frontCheckTypes} canEdit={canEditFront} onToggle={toggleCheck} onBulkSet={setChecksBulk} changedCleanIds={changedCleanIds} /> : workspace === 'front_check' ?
         <FrontDayCheckView rows={frontDayRows} query={query} setQuery={setQuery} canEdit={canEditFront} onToggle={toggleFrontDayRow} cleanFileRef={cleanFileRef} cleanImporting={cleanImporting} onCleanImport={importCleanFile} initialized={frontDayRows.length > 0} onResetChecks={resetDayChecks} /> :
         <>
           <section className="progress-card"><div><span>Avancement de la préparation</span><strong>{counts.ready} / {rows.length} réservations prêtes</strong></div><div className="progress-value">{progress}%</div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div></section>
@@ -603,25 +628,75 @@ function printFrontBoard(title: string, rows: Reservation[], checked: (id: strin
   popup.document.close()
 }
 
-function FrontOfficeView({ rows, query, setQuery, checked, frontCheckTypes, canEdit, onToggle, changedCleanIds }: {
+function FrontOfficeView({ rows, query, setQuery, checked, frontCheckTypes, canEdit, onToggle, onBulkSet, changedCleanIds }: {
   rows: Reservation[], query: string, setQuery: (value: string) => void, checked: (id: string, code: string) => boolean,
-  frontCheckTypes: CheckType[], canEdit: boolean, onToggle: (id: string, code: string) => Promise<void>, changedCleanIds: Set<string>,
+  frontCheckTypes: CheckType[], canEdit: boolean, onToggle: (id: string, code: string) => Promise<void>,
+  onBulkSet: (ids: string[], code: string, isChecked: boolean) => Promise<void>, changedCleanIds: Set<string>,
 }) {
   const [frontSort, setFrontSort] = useState<'name' | 'pitch'>('name')
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [bulkSaving, setBulkSaving] = useState<string | null>(null)
   const needle = query.trim().toLocaleLowerCase('fr')
   const searched = useMemo(() => sortFrontRows(rows.filter((row) => !needle || [row.firstname, row.lastname, row.reservation_number, row.pitch, row.accommodation_type].some((value) => String(value ?? '').toLocaleLowerCase('fr').includes(needle))), frontSort), [rows, needle, frontSort])
   const ready = searched.filter((row) => row.call_status !== 'cif_pas_possible' && checked(row.id, 'cif_ready'))
   const notReady = searched.filter((row) => row.call_status === 'cif_pas_possible' || !checked(row.id, 'cif_ready'))
+  const visibleIds = useMemo(() => searched.map((row) => row.id), [searched])
+  const selectedVisibleIds = visibleIds.filter((id) => selectedIds.has(id))
+  const allVisibleSelected = visibleIds.length > 0 && selectedVisibleIds.length === visibleIds.length
   const setupMissing = FRONT_CHECK_CODES.some((code) => !frontCheckTypes.some((type) => type.code === code)) || rows.some((row) => !('clean_status' in row))
+  const orderedTypes = FRONT_CHECK_CODES.map((code) => frontCheckTypes.find((type) => type.code === code)).filter(Boolean) as CheckType[]
+  const iconByCode: Record<string, React.ReactNode> = { key_sticker: <KeyRound size={14} />, dog: <Dog size={14} />, plan: <MapIcon size={14} />, bracelets: <CircleCheck size={14} />, verification: <ClipboardCheck size={14} /> }
+
+  useEffect(() => {
+    const visible = new Set(visibleIds)
+    setSelectedIds((current) => {
+      const next = new Set([...current].filter((id) => visible.has(id)))
+      if (next.size === current.size && [...next].every((id) => current.has(id))) return current
+      return next
+    })
+  }, [visibleIds])
+
+  function toggleSelection(id: string) {
+    setSelectedIds((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  function toggleRowsSelection(ids: string[]) {
+    setSelectedIds((current) => {
+      const allSelected = ids.length > 0 && ids.every((id) => current.has(id))
+      const next = new Set(current)
+      for (const id of ids) allSelected ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+  async function applyBulk(type: CheckType) {
+    if (!selectedVisibleIds.length || bulkSaving) return
+    const shouldCheck = !selectedVisibleIds.every((id) => checked(id, type.code))
+    setBulkSaving(type.code)
+    try { await onBulkSet(selectedVisibleIds, type.code, shouldCheck) }
+    catch { /* L'erreur détaillée est déjà affichée par la fonction de sauvegarde. */ }
+    finally { setBulkSaving(null) }
+  }
+
   return <div className="front-workspace">
     <section className="front-hero"><div><span>Suivi accueil en temps réel</span><strong>{ready.length} CIF prêts · {notReady.length} CIF pas OK</strong></div><div className="front-hero-actions">
       {changedCleanIds.size > 0 && <span className="front-changes-summary"><RefreshCw size={15} />{changedCleanIds.size} statut{changedCleanIds.size > 1 ? 's' : ''} Clean modifié{changedCleanIds.size > 1 ? 's' : ''}</span>}
       <label className="front-sort"><ArrowUpDown size={15} /><select value={frontSort} onChange={(event) => setFrontSort(event.target.value as 'name' | 'pitch')}><option value="name">Nom</option><option value="pitch">Emplacement</option></select></label>
       <div className="front-search"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Nom, réservation ou emplacement…" /></div></div></section>
     {setupMissing && <div className="front-setup-warning"><AlertTriangle size={18} /><div><strong>Une étape Supabase est nécessaire</strong><span>Exécutez le fichier <code>supabase/front_office_v2.sql</code> une seule fois pour activer l’état Clean et les contrôles Plan, Clé, Macaron, Bracelets et Chien.</span></div></div>}
+    {canEdit && visibleIds.length > 0 && <section className={`front-bulk-toolbar ${selectedVisibleIds.length ? 'has-selection' : ''}`}>
+      <button className={`front-select-all ${allVisibleSelected ? 'selected' : ''}`} onClick={() => toggleRowsSelection(visibleIds)}><span className="front-select-box">{allVisibleSelected && <Check size={14} />}</span>{allVisibleSelected ? 'Tout désélectionner' : `Sélectionner les ${visibleIds.length} réservations affichées`}</button>
+      {selectedVisibleIds.length > 0 && <><div className="front-bulk-summary"><strong>{selectedVisibleIds.length}</strong><span>sélectionnée{selectedVisibleIds.length > 1 ? 's' : ''}</span></div><div className="front-bulk-divider" /><span className="front-bulk-label">Appliquer à la sélection</span><div className="front-bulk-actions">{orderedTypes.map((type) => {
+        const allChecked = selectedVisibleIds.every((id) => checked(id, type.code))
+        return <button key={type.id} disabled={Boolean(bulkSaving)} title={allChecked ? `Décocher « ${type.label} » pour la sélection` : `Cocher « ${type.label} » pour la sélection`} className={`front-bulk-action check-${type.code} ${allChecked ? 'checked' : ''} ${bulkSaving === type.code ? 'saving' : ''}`} onClick={() => void applyBulk(type)}>{bulkSaving === type.code ? <RefreshCw className="bulk-spinner" size={14} /> : iconByCode[type.code] ?? <Check size={14} />}<span>{type.label}</span>{allChecked && <Check size={13} />}</button>
+      })}</div><button className="front-clear-selection" onClick={() => setSelectedIds(new Set())}><X size={14} />Effacer</button></>}
+    </section>}
     <div className="front-boards">
-      <FrontBoard title="CIF prêts" subtitle="Dossiers validés par le Back Office" tone="ready" rows={ready} checked={checked} types={frontCheckTypes} canEdit={canEdit} onToggle={onToggle} changedCleanIds={changedCleanIds} />
-      <FrontBoard title="CIF pas OK" subtitle="En attente de validation du Back Office" tone="pending" rows={notReady} checked={checked} types={frontCheckTypes} canEdit={canEdit} onToggle={onToggle} changedCleanIds={changedCleanIds} />
+      <FrontBoard title="CIF prêts" subtitle="Dossiers validés par le Back Office" tone="ready" rows={ready} checked={checked} types={frontCheckTypes} canEdit={canEdit} onToggle={onToggle} selectedIds={selectedIds} onToggleSelection={toggleSelection} onToggleRowsSelection={toggleRowsSelection} changedCleanIds={changedCleanIds} />
+      <FrontBoard title="CIF pas OK" subtitle="En attente de validation du Back Office" tone="pending" rows={notReady} checked={checked} types={frontCheckTypes} canEdit={canEdit} onToggle={onToggle} selectedIds={selectedIds} onToggleSelection={toggleSelection} onToggleRowsSelection={toggleRowsSelection} changedCleanIds={changedCleanIds} />
     </div>
   </div>
 }
@@ -663,19 +738,26 @@ function DayCheckRow({ row, canEdit, onToggle }: { row: FrontDayRow, canEdit: bo
   return <article className={`day-check-row ${row.is_verified ? 'is-ok' : ''} ${changed ? 'is-changed' : ''}`}><div className="day-check-client"><div className="avatar">{(row.firstname?.[0] ?? '?').toUpperCase()}{(row.lastname?.[0] ?? '').toUpperCase()}</div><div><h3>{(row.lastname ?? '').toUpperCase()} {row.firstname}{row.is_last_minute && <em className="day-last-minute">Last minute</em>}</h3><p><Hash size={13} />{row.reservation_number}</p><span className="front-location"><MapPin size={13} /><strong className="front-pitch">{row.pitch || 'Sans emplacement'}</strong><em>· {row.accommodation_type || 'Hébergement non renseigné'}</em></span></div></div><div className="day-check-clean">{changed && <span className="status-change-label"><RefreshCw size={12} />Changement détecté</span>}<div className={`clean-status ${status}`}><Sparkles size={14} /><span>Clean</span><strong>{cleanLabel(status)}</strong></div>{changed && <small>{cleanLabel(previous)} <ChevronRight size={12} /> <strong>{cleanLabel(status)}</strong></small>}</div><button disabled={!canEdit} className={`day-ok-button ${row.is_verified ? 'checked' : ''}`} onClick={() => void onToggle()}>{row.is_verified ? <CircleCheck size={20} /> : <span className="empty-check" />}<span>{row.is_verified ? 'Vérifié' : 'Marquer OK'}</span></button></article>
 }
 
-function FrontBoard({ title, subtitle, tone, rows, checked, types, canEdit, onToggle, changedCleanIds }: {
+function FrontBoard({ title, subtitle, tone, rows, checked, types, canEdit, onToggle, selectedIds, onToggleSelection, onToggleRowsSelection, changedCleanIds }: {
   title: string, subtitle: string, tone: 'ready' | 'pending', rows: Reservation[], checked: (id: string, code: string) => boolean,
-  types: CheckType[], canEdit: boolean, onToggle: (id: string, code: string) => Promise<void>, changedCleanIds: Set<string>,
+  types: CheckType[], canEdit: boolean, onToggle: (id: string, code: string) => Promise<void>, selectedIds: Set<string>,
+  onToggleSelection: (id: string) => void, onToggleRowsSelection: (ids: string[]) => void, changedCleanIds: Set<string>,
 }) {
   const [showPrintOptions, setShowPrintOptions] = useState(false)
   const [printOptions, setPrintOptions] = useState<FrontPrintOptions>({ sort: 'name', client: true, reservation: true, pitch: true, accommodation: true, clean: true, checks: true })
-  return <section className={`front-board ${tone}`}><header><div><span className="front-board-dot" /><div><h2>{title}</h2><p>{subtitle}</p></div></div><div className="front-board-actions"><div className="front-print-wrap"><button onClick={() => setShowPrintOptions((current) => !current)} disabled={!rows.length} title={`Choisir puis imprimer la liste ${title}`}><Printer size={15} />Imprimer<ChevronDown size={13} /></button>{showPrintOptions && <div className="front-print-options"><strong>Impression</strong><label>Ordre<select value={printOptions.sort} onChange={(event) => setPrintOptions((current) => ({ ...current, sort: event.target.value as 'name' | 'pitch' }))}><option value="name">Nom</option><option value="pitch">Emplacement</option></select></label>{([['client','Client'],['reservation','Réservation'],['pitch','Emplacement'],['accommodation','Hébergement'],['clean','Clean'],['checks','Cases accueil']] as const).map(([key,label]) => <label className="print-check" key={key}><input type="checkbox" checked={printOptions[key]} onChange={() => setPrintOptions((current) => ({ ...current, [key]: !current[key] }))} />{label}</label>)}<button className="print-confirm" onClick={() => { printFrontBoard(title, rows, checked, printOptions); setShowPrintOptions(false) }}><Printer size={14} />Lancer l’impression</button></div>}</div><strong>{rows.length}</strong></div></header><div className="front-board-columns"><span>Client</span><span>Préparation accueil</span></div><div className="front-board-list">{rows.map((row) => <FrontRow key={row.id} row={row} checked={checked} types={types} canEdit={canEdit} onToggle={onToggle} cleanChanged={changedCleanIds.has(row.id)} />)}{!rows.length && <div className="front-empty">Aucune réservation dans cette liste.</div>}</div></section>
+  const rowIds = rows.map((row) => row.id)
+  const selectedCount = rowIds.filter((id) => selectedIds.has(id)).length
+  const allSelected = rows.length > 0 && selectedCount === rows.length
+  const partiallySelected = selectedCount > 0 && !allSelected
+  return <section className={`front-board ${tone}`}><header><div><span className="front-board-dot" /><div><h2>{title}</h2><p>{subtitle}</p></div></div><div className="front-board-actions">
+    {canEdit && rows.length > 0 && <button className={`front-board-select ${allSelected ? 'selected' : ''} ${partiallySelected ? 'partial' : ''}`} onClick={() => onToggleRowsSelection(rowIds)} title={allSelected ? `Désélectionner toutes les réservations de ${title}` : `Sélectionner toutes les réservations de ${title}`}><span className="front-select-box">{allSelected ? <Check size={13} /> : partiallySelected ? <span className="front-select-minus" /> : null}</span><span>{allSelected ? 'Désélectionner' : 'Tout sélectionner'}</span></button>}
+    <div className="front-print-wrap"><button onClick={() => setShowPrintOptions((current) => !current)} disabled={!rows.length} title={`Choisir puis imprimer la liste ${title}`}><Printer size={15} />Imprimer<ChevronDown size={13} /></button>{showPrintOptions && <div className="front-print-options"><strong>Impression</strong><label>Ordre<select value={printOptions.sort} onChange={(event) => setPrintOptions((current) => ({ ...current, sort: event.target.value as 'name' | 'pitch' }))}><option value="name">Nom</option><option value="pitch">Emplacement</option></select></label>{([['client','Client'],['reservation','Réservation'],['pitch','Emplacement'],['accommodation','Hébergement'],['clean','Clean'],['checks','Cases accueil']] as const).map(([key,label]) => <label className="print-check" key={key}><input type="checkbox" checked={printOptions[key]} onChange={() => setPrintOptions((current) => ({ ...current, [key]: !current[key] }))} />{label}</label>)}<button className="print-confirm" onClick={() => { printFrontBoard(title, rows, checked, printOptions); setShowPrintOptions(false) }}><Printer size={14} />Lancer l’impression</button></div>}</div><strong>{rows.length}</strong></div></header><div className="front-board-columns"><span>Client</span><span>Préparation accueil</span></div><div className="front-board-list">{rows.map((row) => <FrontRow key={row.id} row={row} checked={checked} types={types} canEdit={canEdit} onToggle={onToggle} selected={selectedIds.has(row.id)} onToggleSelection={() => onToggleSelection(row.id)} cleanChanged={changedCleanIds.has(row.id)} />)}{!rows.length && <div className="front-empty">Aucune réservation dans cette liste.</div>}</div></section>
 }
-function FrontRow({ row, checked, types, canEdit, onToggle, cleanChanged }: { row: Reservation, checked: (id: string, code: string) => boolean, types: CheckType[], canEdit: boolean, onToggle: (id: string, code: string) => Promise<void>, cleanChanged: boolean }) {
+function FrontRow({ row, checked, types, canEdit, onToggle, selected, onToggleSelection, cleanChanged }: { row: Reservation, checked: (id: string, code: string) => boolean, types: CheckType[], canEdit: boolean, onToggle: (id: string, code: string) => Promise<void>, selected: boolean, onToggleSelection: () => void, cleanChanged: boolean }) {
   const iconByCode: Record<string, React.ReactNode> = { key_sticker: <KeyRound size={14} />, dog: <Dog size={14} />, plan: <MapIcon size={14} />, bracelets: <CircleCheck size={14} />, verification: <ClipboardCheck size={14} /> }
   const ordered = FRONT_CHECK_CODES.map((code) => types.find((type) => type.code === code)).filter(Boolean) as CheckType[]
   const cleanStatus = row.clean_status ?? 'non_renseigne'
-  return <article className={`front-row ${cleanChanged ? 'clean-changed' : ''}`}><div className="front-client"><div className="avatar">{(row.firstname?.[0] ?? '?').toUpperCase()}{(row.lastname?.[0] ?? '').toUpperCase()}</div><div><h3>{(row.lastname ?? '').toUpperCase()} {row.firstname}{cleanChanged && <span className="clean-change-badge" title="L’état Clean a changé lors de la dernière mise à jour"><RefreshCw size={11} />Modifié</span>}</h3><p><Hash size={13} />{row.reservation_number}</p><span className="front-location"><MapPin size={13} /><strong className="front-pitch">{row.pitch || 'Sans emplacement'}</strong><em>· {row.accommodation_type || 'Hébergement non renseigné'}</em></span></div></div><div className="front-preparation"><div className={`clean-status ${cleanStatus}`} title="État mis à jour par le tableau des logements"><Sparkles size={14} /><span>Clean</span><strong>{cleanLabel(cleanStatus)}</strong></div><div className="front-checks">{ordered.map((type) => <button key={type.id} disabled={!canEdit} title={canEdit ? type.label : `${type.label} — lecture seule`} className={`front-check check-${type.code} ${checked(row.id, type.code) ? 'checked' : ''}`} onClick={() => void onToggle(row.id, type.code)}>{iconByCode[type.code] ?? <Check size={14} />}<span>{type.label}</span>{checked(row.id, type.code) && <Check className="front-check-tick" size={13} />}</button>)}</div></div></article>
+  return <article className={`front-row ${selected ? 'is-selected' : ''} ${cleanChanged ? 'clean-changed' : ''}`}><div className="front-client">{canEdit && <button className={`front-row-select ${selected ? 'selected' : ''}`} onClick={onToggleSelection} title={selected ? 'Retirer cette réservation de la sélection' : 'Sélectionner cette réservation'} aria-label={selected ? 'Désélectionner cette réservation' : 'Sélectionner cette réservation'}><span className="front-select-box">{selected && <Check size={14} />}</span></button>}<div className="avatar">{(row.firstname?.[0] ?? '?').toUpperCase()}{(row.lastname?.[0] ?? '').toUpperCase()}</div><div><h3>{(row.lastname ?? '').toUpperCase()} {row.firstname}{cleanChanged && <span className="clean-change-badge" title="L’état Clean a changé lors de la dernière mise à jour"><RefreshCw size={11} />Modifié</span>}</h3><p><Hash size={13} />{row.reservation_number}</p><span className="front-location"><MapPin size={13} /><strong className="front-pitch">{row.pitch || 'Sans emplacement'}</strong><em>· {row.accommodation_type || 'Hébergement non renseigné'}</em></span></div></div><div className="front-preparation"><div className={`clean-status ${cleanStatus}`} title="État mis à jour par le tableau des logements"><Sparkles size={14} /><span>Clean</span><strong>{cleanLabel(cleanStatus)}</strong></div><div className="front-checks">{ordered.map((type) => <button key={type.id} disabled={!canEdit} title={canEdit ? type.label : `${type.label} — lecture seule`} className={`front-check check-${type.code} ${checked(row.id, type.code) ? 'checked' : ''}`} onClick={() => void onToggle(row.id, type.code)}>{iconByCode[type.code] ?? <Check size={14} />}<span>{type.label}</span>{checked(row.id, type.code) && <Check className="front-check-tick" size={13} />}</button>)}</div></div></article>
 }
 function QuickCheck({ label, checked, onClick, important = false }: { label: string, checked: boolean, onClick: (event: React.MouseEvent<HTMLButtonElement>) => void, important?: boolean }) {
   return <button onClick={onClick} className={`quick-check ${checked ? 'checked' : ''} ${important ? 'important' : ''}`}>{checked ? <Check size={15} /> : <X size={15} />}<span>{label}</span></button>
