@@ -1,5 +1,84 @@
-import { createClient } from '@supabase/supabase-js'
-const url = import.meta.env.VITE_SUPABASE_URL as string | undefined
-const key = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined
-export const hasSupabase = Boolean(url && key && !url.includes('VOTRE-PROJET'))
-export const supabase = hasSupabase ? createClient(url!, key!, {auth:{persistSession:true,autoRefreshToken:true}}) : null
+export type AppRole = 'admin' | 'back_office' | 'front_office' | 'direction'
+export type CallStatus = 'a_appeler' | 'message_laisse' | 'a_rappeler' | 'attente_client' | 'termine' | 'cif_pas_possible'
+
+export type Profile = {
+  id: string
+  username: string
+  display_name: string
+  role: AppRole
+  is_active: boolean
+}
+
+export type ArrivalDay = {
+  id: string
+  name: string
+  arrival_date: string
+  status: 'open' | 'archived'
+  created_at?: string
+  updated_at?: string
+  front_clean_initialized?: boolean
+}
+
+export type Reservation = {
+  id: string
+  arrival_day_id: string
+  reservation_number: string
+  firstname: string | null
+  lastname: string | null
+  booking_channel: string | null
+  accommodation_type: string | null
+  pitch: string | null
+  remaining_amount: number | null
+  is_last_minute: boolean
+  source: 'import' | 'manual'
+  call_status: CallStatus | null
+  internal_note: string | null
+  clean_status?: 'non_renseigne' | 'clean' | 'to_be_cleaned' | 'in_progress' | 'postponed' | 'to_be_checked' | 'touch_up' | string | null
+  clean_previous_status?: string | null
+  clean_changed_at?: string | null
+  created_at?: string
+  updated_at?: string
+}
+
+export type Department = {
+  id: string
+  code: string
+  name: string
+}
+
+export type CheckType = {
+  id: string
+  department_id: string
+  code: string
+  label: string
+  description: string | null
+  sort_order: number
+  is_required: boolean
+  is_active: boolean
+}
+
+export type ReservationCheck = {
+  id?: string
+  reservation_id: string
+  check_type_id: string
+  is_checked: boolean
+  updated_at?: string
+}
+
+
+export type FrontDayRow = {
+  id: string
+  arrival_day_id: string
+  reservation_number: string
+  firstname: string | null
+  lastname: string | null
+  accommodation_type: string | null
+  pitch: string | null
+  clean_status: string | null
+  clean_previous_status: string | null
+  clean_changed_at: string | null
+  is_verified: boolean
+  is_last_minute: boolean
+  created_at?: string
+  updated_at?: string
+}
