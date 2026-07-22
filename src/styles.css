@@ -444,3 +444,89 @@ header::after{content:"";position:absolute;left:0;right:0;bottom:-11px;height:1p
 .row-call-status.red{background:#fff0f0;border-color:#efbcbc;color:#963535}
 .call-status-menu button.red:hover,.call-status-menu button.red.selected{background:#fff0f0;color:#963535}
 .status-picker .red.on{background:#fff0f0}
+
+
+/* Ajustements visuels — badge Pas possible et Front Office */
+.state-pill.impossible{
+  min-width:86px;
+  min-height:30px;
+  padding:7px 12px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border:1px solid #f3aaaa;
+  border-radius:11px;
+  background:#ffe8e8;
+  color:#b72d2d;
+  font-size:10px;
+  font-weight:900;
+  line-height:1;
+  letter-spacing:.01em;
+  box-shadow:0 2px 6px rgba(183,45,45,.08);
+}
+
+.front-location{
+  display:flex !important;
+  align-items:center;
+  gap:5px !important;
+  min-width:0;
+}
+
+.front-location .front-pitch{
+  flex:0 0 auto;
+  color:#315e50;
+  font-size:11px;
+  font-weight:900;
+  letter-spacing:.015em;
+}
+
+.front-location em{
+  overflow:hidden;
+  color:#7a8883;
+  font-size:10px;
+  font-style:normal;
+  font-weight:500;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.front-check.checked{
+  border-width:1px;
+  font-weight:800;
+  box-shadow:0 2px 6px rgba(37,93,72,.10);
+}
+
+.front-check.check-key_sticker.checked{
+  border-color:#72a8d8;
+  background:#e8f3fc;
+  color:#245f91;
+}
+
+.front-check.check-dog.checked{
+  border-color:#d9a55d;
+  background:#fff2df;
+  color:#8a5818;
+}
+
+.front-check.check-plan.checked{
+  border-color:#9c8fd0;
+  background:#f0edfb;
+  color:#5d4b9a;
+}
+
+.front-check.check-bracelets.checked{
+  border-color:#55b3ad;
+  background:#e4f6f4;
+  color:#176c68;
+}
+
+.front-check.check-verification.checked{
+  border-color:#65ad85;
+  background:#e5f5eb;
+  color:#216b43;
+}
+
+.front-check.checked .front-check-tick{
+  opacity:1;
+  stroke-width:3;
+}
