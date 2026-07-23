@@ -66,6 +66,18 @@ export type ReservationCheck = {
 }
 
 
+
+export type FrontCleanStatus = {
+  id: string
+  arrival_day_id: string
+  reservation_number: string
+  clean_status: string
+  clean_previous_status: string | null
+  clean_changed_at: string | null
+  created_at?: string
+  updated_at?: string
+}
+
 export type FrontDayRow = {
   id: string
   arrival_day_id: string

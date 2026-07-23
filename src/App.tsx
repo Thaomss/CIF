@@ -6,7 +6,7 @@ import {
 } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import { hasSupabase, supabase } from './supabase'
-import type { ArrivalDay, CallStatus, CheckType, FrontDayRow, Profile, Reservation, ReservationCheck } from './types'
+import type { ArrivalDay, CallStatus, CheckType, FrontCleanStatus, FrontDayRow, Profile, Reservation, ReservationCheck } from './types'
 
 const TECHNICAL_DOMAIN = 'camping.local'
 const FRONT_CHECK_CODES = ['key_sticker', 'dog', 'plan', 'bracelets', 'verification'] as const
@@ -170,15 +170,16 @@ function findCleanImportTable(workbook: XLSX.WorkBook) {
       const columns = buildCleanColumnMap(rows[headerRowIndex] ?? [])
       if (columns.reservation < 0) continue
       const recognizedColumns = Object.values(columns).filter((index) => index >= 0).length
-      const usefulColumns = [columns.firstname, columns.lastname, columns.pitch, columns.cleaning, columns.accommodation].filter((index) => index >= 0).length
-      if (usefulColumns < 2) continue
+      const descriptiveColumns = [columns.firstname, columns.lastname, columns.pitch, columns.accommodation].filter((index) => index >= 0).length
+      const hasUsefulData = columns.cleaning >= 0 || descriptiveColumns >= 2
+      if (!hasUsefulData) continue
       const score = recognizedColumns * 100 - headerRowIndex
       if (!best || score > best.score) best = { rows, headerRowIndex, columns, score }
     }
   }
 
   if (!best) {
-    throw new Error('Impossible de trouver les colonnes du contrôle journée. Le fichier doit contenir au minimum « Reservation Number » ainsi que les colonnes client, emplacement ou nettoyage.')
+    throw new Error('Impossible de trouver les colonnes attendues. Le fichier doit contenir « Reservation Number » avec « Cleaning Status », ou des informations client et emplacement.')
   }
   return best
 }
@@ -328,12 +329,15 @@ export default function App() {
   const [cleanImportSummary, setCleanImportSummary] = useState<{ updated: number, changed: number, added: number, missing: number, statusesProvided: boolean, unknownStatuses: string[], multiReservationCount: number } | null>(null)
   const [pendingMissingRows, setPendingMissingRows] = useState<FrontDayRow[]>([])
   const [missingRowsToDelete, setMissingRowsToDelete] = useState<Set<string>>(new Set())
-  const [cleanTracking, setCleanTracking] = useState(false)
-  const [cleanBaselineReady, setCleanBaselineReady] = useState(false)
-  const [changedCleanIds, setChangedCleanIds] = useState<Set<string>>(new Set())
+  const [frontCleanStatuses, setFrontCleanStatuses] = useState<FrontCleanStatus[]>([])
+  const [frontCleanSetupMissing, setFrontCleanSetupMissing] = useState(false)
+  const [frontCleanImporting, setFrontCleanImporting] = useState(false)
+  const [frontCleanSummary, setFrontCleanSummary] = useState<{ matched: number, initialized: number, changed: number, unchanged: number, ignored: number, unknownStatuses: string[] } | null>(null)
+  const [frontCleanValidating, setFrontCleanValidating] = useState(false)
   const [frontDayRows, setFrontDayRows] = useState<FrontDayRow[]>([])
   const fileRef = useRef<HTMLInputElement>(null)
   const cleanFileRef = useRef<HTMLInputElement>(null)
+  const frontCleanFileRef = useRef<HTMLInputElement>(null)
 
   const checkTypeByCode = useMemo(() => Object.fromEntries(checkTypes.map((item) => [item.code, item])), [checkTypes])
   const backCheckTypes = useMemo(() => checkTypes.filter((item) => departmentCodeById[item.department_id] === 'back_office'), [checkTypes, departmentCodeById])
@@ -342,6 +346,17 @@ export default function App() {
     const type = checkTypeByCode[code]
     return type ? Boolean(checks[`${reservationId}:${type.id}`]) : false
   }
+  const frontCleanByNumber = useMemo(() => new Map<string, FrontCleanStatus>(frontCleanStatuses.map((item) => [reservationNumberValue(item.reservation_number), item] as const)), [frontCleanStatuses])
+  const frontRows = useMemo(() => rows.map((row) => {
+    const frontClean = frontCleanByNumber.get(reservationNumberValue(row.reservation_number))
+    return {
+      ...row,
+      clean_status: frontClean?.clean_status ?? (frontCleanSetupMissing ? row.clean_status : 'non_renseigne'),
+      clean_previous_status: frontClean?.clean_previous_status ?? null,
+      clean_changed_at: frontClean?.clean_changed_at ?? null,
+    }
+  }), [rows, frontCleanByNumber, frontCleanSetupMissing])
+  const changedCleanIds = useMemo(() => new Set(frontRows.filter((row) => Boolean(row.clean_changed_at)).map((row) => row.id)), [frontRows])
 
   useEffect(() => {
     if (!supabase) { setAuthReady(true); return }
@@ -362,6 +377,7 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'reservations', filter: `arrival_day_id=eq.${day.id}` }, () => void loadRows(day.id))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'reservation_checks' }, () => void loadChecks(rows.map((row) => row.id)))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'front_day_rows', filter: `arrival_day_id=eq.${day.id}` }, () => void loadFrontDayRows(day.id))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'front_clean_statuses', filter: `arrival_day_id=eq.${day.id}` }, () => void loadFrontCleanStatuses(day.id))
       .subscribe()
     return () => { void supabase?.removeChannel(channel) }
   }, [signedIn, day?.id, rows.length])
@@ -396,8 +412,8 @@ export default function App() {
     setDays(nextDays)
     const selected = nextDays.find((item) => item.id === (preferredId ?? day?.id)) ?? nextDays[0] ?? null
     setDay(selected)
-    if (selected) { await loadRows(selected.id); await loadFrontDayRows(selected.id) }
-    else { setRows([]); setFrontDayRows([]); setChecks({}) }
+    if (selected) { await loadRows(selected.id); await Promise.all([loadFrontDayRows(selected.id), loadFrontCleanStatuses(selected.id)]) }
+    else { setRows([]); setFrontDayRows([]); setFrontCleanStatuses([]); setChecks({}) }
   }
   async function loadRows(arrivalDayId: string) {
     if (!supabase) return
@@ -405,7 +421,6 @@ export default function App() {
     if (loadError) { setError(loadError.message); return }
     const nextRows = (data ?? []) as Reservation[]
     setRows(nextRows)
-    setChangedCleanIds(new Set(nextRows.filter((row) => Boolean(row.clean_changed_at)).map((row) => row.id)))
     await loadChecks(nextRows.map((row) => row.id))
   }
   async function loadFrontDayRows(arrivalDayId: string) {
@@ -418,6 +433,22 @@ export default function App() {
     }
     setFrontDayRows((data ?? []) as FrontDayRow[])
   }
+  async function loadFrontCleanStatuses(arrivalDayId: string) {
+    if (!supabase) return
+    const { data, error: loadError } = await supabase.from('front_clean_statuses').select('*').eq('arrival_day_id', arrivalDayId)
+    if (loadError) {
+      const missingTable = ['42P01', 'PGRST204', 'PGRST205'].includes(loadError.code ?? '') || loadError.message.toLowerCase().includes('front_clean_statuses')
+      if (missingTable) {
+        setFrontCleanSetupMissing(true)
+        setFrontCleanStatuses([])
+        return
+      }
+      setError(loadError.message)
+      return
+    }
+    setFrontCleanSetupMissing(false)
+    setFrontCleanStatuses((data ?? []) as FrontCleanStatus[])
+  }
   async function loadChecks(reservationIds: string[]) {
     if (!supabase || reservationIds.length === 0) { setChecks({}); return }
     const { data, error: loadError } = await supabase.from('reservation_checks').select('*').in('reservation_id', reservationIds)
@@ -429,7 +460,7 @@ export default function App() {
   async function chooseDay(next: ArrivalDay) {
     setDay(next); setExpanded(null); setQuery(''); setFilter('all'); setCallFilter('all'); setVisibleCount(60)
     await loadRows(next.id)
-    await loadFrontDayRows(next.id)
+    await Promise.all([loadFrontDayRows(next.id), loadFrontCleanStatuses(next.id)])
   }
   async function createDay() {
     if (!supabase || !newDate) return
@@ -601,8 +632,6 @@ export default function App() {
       await loadFrontDayRows(day.id)
       setPendingMissingRows(missingRows)
       setMissingRowsToDelete(new Set())
-      setCleanBaselineReady(true)
-      setCleanTracking(true)
       setCleanImportSummary({
         updated,
         changed,
@@ -617,6 +646,144 @@ export default function App() {
     } finally {
       setCleanImporting(false)
       if (cleanFileRef.current) cleanFileRef.current.value = ''
+    }
+  }
+
+  async function importFrontCleanFile(file: File) {
+    if (!supabase || !day) return
+    if (frontCleanSetupMissing) {
+      alert('La table Front indépendante n’est pas encore installée. Exécutez le fichier « supabase/front_clean_independent.sql » dans Supabase puis réessayez.')
+      if (frontCleanFileRef.current) frontCleanFileRef.current.value = ''
+      return
+    }
+    setFrontCleanImporting(true)
+    setFrontCleanSummary(null)
+    try {
+      const importResult = parseCleanWorkbook(await file.arrayBuffer())
+      if (!importResult.hasCleaningStatuses) throw new Error('Aucune colonne « Cleaning Status » n’a été trouvée dans ce fichier.')
+      const parsedWithStatus = importResult.rows.filter((item) => item.clean_status !== null)
+      if (!parsedWithStatus.length) throw new Error('Aucun état de nettoyage renseigné n’a été trouvé dans ce fichier.')
+
+      const reservationsByNumber = new Map<string, Reservation>(rows.map((row) => [reservationNumberValue(row.reservation_number), row] as const))
+      const existingByNumber = new Map<string, FrontCleanStatus>(frontCleanStatuses.map((item) => [reservationNumberValue(item.reservation_number), item] as const))
+      const now = new Date().toISOString()
+      const payload: Array<{
+        arrival_day_id: string
+        reservation_number: string
+        clean_status: string
+        clean_previous_status: string | null
+        clean_changed_at: string | null
+        updated_at: string
+      }> = []
+      let matched = 0
+      let initialized = 0
+      let changed = 0
+      let unchanged = 0
+      let ignored = 0
+
+      for (const item of parsedWithStatus) {
+        const number = reservationNumberValue(item.reservation_number)
+        if (!reservationsByNumber.has(number)) {
+          ignored += 1
+          continue
+        }
+        matched += 1
+        const nextStatus = item.clean_status ?? 'non_renseigne'
+        const current = existingByNumber.get(number)
+        if (!current) {
+          initialized += 1
+          payload.push({
+            arrival_day_id: day.id,
+            reservation_number: number,
+            clean_status: nextStatus,
+            clean_previous_status: null,
+            clean_changed_at: null,
+            updated_at: now,
+          })
+          continue
+        }
+
+        if (current.clean_status === nextStatus) {
+          unchanged += 1
+          continue
+        }
+
+        const validatedBaseline = current.clean_changed_at
+          ? current.clean_previous_status ?? current.clean_status
+          : current.clean_status
+        const returnedToBaseline = nextStatus === validatedBaseline
+        payload.push({
+          arrival_day_id: day.id,
+          reservation_number: number,
+          clean_status: nextStatus,
+          clean_previous_status: returnedToBaseline ? null : validatedBaseline,
+          clean_changed_at: returnedToBaseline ? null : now,
+          updated_at: now,
+        })
+        changed += 1
+      }
+
+      for (let index = 0; index < payload.length; index += 100) {
+        const { error: upsertError } = await supabase.from('front_clean_statuses').upsert(payload.slice(index, index + 100), { onConflict: 'arrival_day_id,reservation_number' })
+        if (upsertError) throw upsertError
+      }
+      await loadFrontCleanStatuses(day.id)
+      setFrontCleanSummary({
+        matched,
+        initialized,
+        changed,
+        unchanged,
+        ignored,
+        unknownStatuses: importResult.unknownStatuses,
+      })
+    } catch (caught) {
+      alert(describeError(caught, 'Impossible de mettre à jour les états de nettoyage du Front Office.'))
+    } finally {
+      setFrontCleanImporting(false)
+      if (frontCleanFileRef.current) frontCleanFileRef.current.value = ''
+    }
+  }
+
+  async function acknowledgeFrontClean(reservationId: string) {
+    if (!supabase || !day) return
+    const reservation = rows.find((row) => row.id === reservationId)
+    if (!reservation) return
+    const number = reservationNumberValue(reservation.reservation_number)
+    const cleanRow = frontCleanByNumber.get(number)
+    if (!cleanRow?.clean_changed_at) return
+    setFrontCleanStatuses((current) => current.map((item) => item.id === cleanRow.id ? { ...item, clean_previous_status: null, clean_changed_at: null } : item))
+    const { error: updateError } = await supabase.from('front_clean_statuses').update({
+      clean_previous_status: null,
+      clean_changed_at: null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', cleanRow.id)
+    if (updateError) {
+      alert(describeError(updateError, 'Impossible de valider ce changement.'))
+      await loadFrontCleanStatuses(day.id)
+    }
+  }
+
+  async function acknowledgeAllFrontClean() {
+    if (!supabase || !day || frontCleanValidating) return
+    const currentNumbers = new Set(rows.map((row) => reservationNumberValue(row.reservation_number)))
+    const ids = frontCleanStatuses.filter((item) => Boolean(item.clean_changed_at) && currentNumbers.has(reservationNumberValue(item.reservation_number))).map((item) => item.id)
+    if (!ids.length) return
+    setFrontCleanValidating(true)
+    setFrontCleanStatuses((current) => current.map((item) => ids.includes(item.id) ? { ...item, clean_previous_status: null, clean_changed_at: null } : item))
+    try {
+      for (let index = 0; index < ids.length; index += 100) {
+        const { error: updateError } = await supabase.from('front_clean_statuses').update({
+          clean_previous_status: null,
+          clean_changed_at: null,
+          updated_at: new Date().toISOString(),
+        }).in('id', ids.slice(index, index + 100))
+        if (updateError) throw updateError
+      }
+    } catch (caught) {
+      alert(describeError(caught, 'Impossible de valider tous les changements.'))
+      await loadFrontCleanStatuses(day.id)
+    } finally {
+      setFrontCleanValidating(false)
     }
   }
 
@@ -749,7 +916,7 @@ export default function App() {
       </header>
       {error && <div className="error page-error">{error}</div>}
       {!day ? <div className="empty"><h2>Aucune journée</h2><p>Créez le prochain samedi d’arrivées pour commencer.</p>{canManageDays && <button className="primary" onClick={() => setShowNewDay(true)}><Plus size={17} />Créer une journée</button>}</div> : workspace === 'front' ?
-        <FrontOfficeView rows={rows} query={query} setQuery={setQuery} checked={checked} frontCheckTypes={frontCheckTypes} canEdit={canEditFront} onToggle={toggleCheck} onBulkSet={setChecksBulk} changedCleanIds={changedCleanIds} /> : workspace === 'front_check' ?
+        <FrontOfficeView rows={frontRows} query={query} setQuery={setQuery} checked={checked} frontCheckTypes={frontCheckTypes} canEdit={canEditFront} onToggle={toggleCheck} onBulkSet={setChecksBulk} changedCleanIds={changedCleanIds} cleanFileRef={frontCleanFileRef} cleanImporting={frontCleanImporting} onCleanImport={importFrontCleanFile} onAcknowledgeClean={acknowledgeFrontClean} onAcknowledgeAllClean={acknowledgeAllFrontClean} cleanValidating={frontCleanValidating} cleanSetupMissing={frontCleanSetupMissing} /> : workspace === 'front_check' ?
         <FrontDayCheckView rows={frontDayRows} query={query} setQuery={setQuery} canEdit={canEditFront} onToggle={toggleFrontDayRow} cleanFileRef={cleanFileRef} cleanImporting={cleanImporting} onCleanImport={importCleanFile} initialized={frontDayRows.length > 0} onResetChecks={resetDayChecks} /> :
         <>
           <section className="progress-card"><div><span>Avancement de la préparation</span><strong>{counts.ready} / {rows.length} réservations prêtes</strong></div><div className="progress-value">{progress}%</div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div></section>
@@ -772,6 +939,7 @@ export default function App() {
       <div className="drawer-danger"><button className="danger-button" onClick={() => void deleteReservation(selected)}><Trash2 size={16} />Supprimer cette réservation</button></div>
     </aside></div>}
     {importSummary && <div className="modal-backdrop" onMouseDown={() => setImportSummary(null)}><section className="modal import-summary" onMouseDown={(e) => e.stopPropagation()}><div className="summary-icon"><CircleCheck size={28} /></div><h2>Mise à jour terminée</h2><p>Les informations du fichier ont été fusionnées. Les coches, notes et statuts ont été conservés.</p><div className="summary-lines"><div><RefreshCw size={17} /><span>{importSummary.updated} réservations mises à jour</span></div><div><Plus size={17} /><span>{importSummary.added} nouvelles réservations ajoutées</span></div><div><AlertTriangle size={17} /><span>{importSummary.missing} réservations absentes, conservées</span></div></div><div className="modal-actions"><button className="primary" onClick={() => setImportSummary(null)}>Terminer</button></div></section></div>}
+    {frontCleanSummary && <div className="modal-backdrop"><section className="modal day-import-summary" onMouseDown={(event) => event.stopPropagation()}><div className="modal-icon success"><RefreshCw size={24} /></div><h2>États du Front mis à jour</h2><p>Le fichier a été comparé uniquement avec les numéros de réservation présents dans les tableaux CIF. Aucune donnée du Back Office n’a été modifiée.</p><div className="summary-lines"><div><Check size={17} /><span>{frontCleanSummary.matched} réservation{frontCleanSummary.matched !== 1 ? 's' : ''} reconnue{frontCleanSummary.matched !== 1 ? 's' : ''}</span></div><div><Sparkles size={17} /><span>{frontCleanSummary.initialized} état{frontCleanSummary.initialized !== 1 ? 's' : ''} initialisé{frontCleanSummary.initialized !== 1 ? 's' : ''} sans alerte</span></div><div><RefreshCw size={17} /><span>{frontCleanSummary.changed} changement{frontCleanSummary.changed !== 1 ? 's' : ''} détecté{frontCleanSummary.changed !== 1 ? 's' : ''} · les changements à confirmer restent orange</span></div><div><CircleCheck size={17} /><span>{frontCleanSummary.unchanged} état{frontCleanSummary.unchanged !== 1 ? 's' : ''} inchangé{frontCleanSummary.unchanged !== 1 ? 's' : ''}</span></div>{frontCleanSummary.ignored > 0 && <div><AlertTriangle size={17} /><span>{frontCleanSummary.ignored} numéro{frontCleanSummary.ignored !== 1 ? 's' : ''} ignoré{frontCleanSummary.ignored !== 1 ? 's' : ''}, car absent{frontCleanSummary.ignored !== 1 ? 's' : ''} de la journée CIF</span></div>}{frontCleanSummary.unknownStatuses.length > 0 && <div><AlertTriangle size={17} /><span>Statut{frontCleanSummary.unknownStatuses.length > 1 ? 's' : ''} inhabituel{frontCleanSummary.unknownStatuses.length > 1 ? 's' : ''} accepté{frontCleanSummary.unknownStatuses.length > 1 ? 's' : ''} : {frontCleanSummary.unknownStatuses.join(', ')}</span></div>}</div><div className="modal-actions"><button className="primary" onClick={() => setFrontCleanSummary(null)}>Terminer</button></div></section></div>}
     {cleanImportSummary && <div className="modal-backdrop"><section className="modal day-import-summary" onMouseDown={(e) => e.stopPropagation()}><div className="modal-icon success"><Sparkles size={24} /></div><h2>Contrôle journée mis à jour</h2><p>{cleanImportSummary.statusesProvided ? 'La liste et les états de nettoyage ont été comparés par numéro de réservation.' : 'La liste a été comparée par numéro de réservation. Ce fichier ne contient pas d’état de nettoyage : les états déjà connus ont été conservés.'} Le Back Office reste inchangé.</p><div className="summary-lines"><div><RefreshCw size={17} /><span>{cleanImportSummary.updated} réservations reconnues · {cleanImportSummary.changed} changement{cleanImportSummary.changed !== 1 ? 's' : ''} de nettoyage détecté{cleanImportSummary.changed !== 1 ? 's' : ''}</span></div><div><Plus size={17} /><span>{cleanImportSummary.added} nouvelle{cleanImportSummary.added !== 1 ? 's' : ''} réservation{cleanImportSummary.added !== 1 ? 's' : ''} ajoutée{cleanImportSummary.added !== 1 ? 's' : ''} avec la mention Last minute</span></div>{cleanImportSummary.missing > 0 && <div><AlertTriangle size={17} /><span>{cleanImportSummary.missing} réservation{cleanImportSummary.missing !== 1 ? 's sont' : ' est'} absente{cleanImportSummary.missing !== 1 ? 's' : ''} du nouveau fichier</span></div>}{cleanImportSummary.multiReservationCount > 0 && <div><Home size={17} /><span>{cleanImportSummary.multiReservationCount} réservation{cleanImportSummary.multiReservationCount > 1 ? 's regroupent' : ' regroupe'} plusieurs logements, conservés ensemble par numéro de réservation</span></div>}{cleanImportSummary.unknownStatuses.length > 0 && <div><AlertTriangle size={17} /><span>Statut{cleanImportSummary.unknownStatuses.length > 1 ? 's' : ''} inhabituel{cleanImportSummary.unknownStatuses.length > 1 ? 's' : ''} accepté{cleanImportSummary.unknownStatuses.length > 1 ? 's' : ''} et comparé{cleanImportSummary.unknownStatuses.length > 1 ? 's' : ''} normalement : {cleanImportSummary.unknownStatuses.join(', ')}</span></div>}</div>{pendingMissingRows.length > 0 && <div className="missing-review"><div className="missing-review-heading"><div><strong>Réservations absentes du nouveau fichier</strong><span>Choisissez seulement celles à supprimer. Les autres seront gardées.</span></div><button type="button" onClick={() => setMissingRowsToDelete(new Set(pendingMissingRows.map((row) => row.id)))}>Tout sélectionner</button></div><div className="missing-review-list">{pendingMissingRows.map((row) => { const markedForDeletion = missingRowsToDelete.has(row.id); return <button type="button" key={row.id} className={markedForDeletion ? 'delete-selected' : ''} onClick={() => toggleMissingRowDecision(row.id)}><span className="missing-review-check">{markedForDeletion ? <Trash2 size={14} /> : <Check size={14} />}</span><span><strong>{(row.lastname ?? '').toUpperCase()} {row.firstname}</strong><small>{row.reservation_number} · emplacement {row.pitch || '—'}</small></span><em>{markedForDeletion ? 'Supprimer' : 'Garder'}</em></button> })}</div></div>}<div className="modal-actions">{pendingMissingRows.length > 0 ? <><button className="secondary" onClick={() => void resolveMissingRows('keep_all')}>Tout garder</button><button className="primary" onClick={() => void resolveMissingRows('apply')}>Valider les choix{missingRowsToDelete.size > 0 ? ` · ${missingRowsToDelete.size} à supprimer` : ''}</button></> : <button className="primary" onClick={() => void resolveMissingRows('keep_all')}>Terminer</button>}</div></section></div>}
     {showNewDay && <div className="modal-backdrop" onMouseDown={() => setShowNewDay(false)}><section className="modal" onMouseDown={(e) => e.stopPropagation()}><h2>Nouvelle journée d’arrivées</h2><p>Chaque journée conserve ses réservations, coches et notes.</p><label>Date du samedi<input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} /></label><div className="modal-actions"><button className="secondary" onClick={() => setShowNewDay(false)}>Annuler</button><button className="primary" disabled={!newDate} onClick={() => void createDay()}>Créer la journée</button></div></section></div>}
   </div>
@@ -838,10 +1006,13 @@ function printFrontBoard(title: string, rows: Reservation[], checked: (id: strin
   popup.document.close()
 }
 
-function FrontOfficeView({ rows, query, setQuery, checked, frontCheckTypes, canEdit, onToggle, onBulkSet, changedCleanIds }: {
+function FrontOfficeView({ rows, query, setQuery, checked, frontCheckTypes, canEdit, onToggle, onBulkSet, changedCleanIds, cleanFileRef, cleanImporting, onCleanImport, onAcknowledgeClean, onAcknowledgeAllClean, cleanValidating, cleanSetupMissing }: {
   rows: Reservation[], query: string, setQuery: (value: string) => void, checked: (id: string, code: string) => boolean,
   frontCheckTypes: CheckType[], canEdit: boolean, onToggle: (id: string, code: string) => Promise<void>,
   onBulkSet: (ids: string[], code: string, isChecked: boolean) => Promise<void>, changedCleanIds: Set<string>,
+  cleanFileRef: React.RefObject<HTMLInputElement>, cleanImporting: boolean, onCleanImport: (file: File) => Promise<void>,
+  onAcknowledgeClean: (reservationId: string) => Promise<void>, onAcknowledgeAllClean: () => Promise<void>,
+  cleanValidating: boolean, cleanSetupMissing: boolean,
 }) {
   const [frontSort, setFrontSort] = useState<'name' | 'pitch'>('name')
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
@@ -853,7 +1024,7 @@ function FrontOfficeView({ rows, query, setQuery, checked, frontCheckTypes, canE
   const visibleIds = useMemo(() => searched.map((row) => row.id), [searched])
   const selectedVisibleIds = visibleIds.filter((id) => selectedIds.has(id))
   const allVisibleSelected = visibleIds.length > 0 && selectedVisibleIds.length === visibleIds.length
-  const setupMissing = FRONT_CHECK_CODES.some((code) => !frontCheckTypes.some((type) => type.code === code)) || rows.some((row) => !('clean_status' in row))
+  const checksSetupMissing = FRONT_CHECK_CODES.some((code) => !frontCheckTypes.some((type) => type.code === code))
   const orderedTypes = FRONT_CHECK_CODES.map((code) => frontCheckTypes.find((type) => type.code === code)).filter(Boolean) as CheckType[]
   const iconByCode: Record<string, React.ReactNode> = { key_sticker: <KeyRound size={14} />, dog: <Dog size={14} />, plan: <MapIcon size={14} />, bracelets: <CircleCheck size={14} />, verification: <ClipboardCheck size={14} /> }
 
@@ -892,11 +1063,15 @@ function FrontOfficeView({ rows, query, setQuery, checked, frontCheckTypes, canE
   }
 
   return <div className="front-workspace">
-    <section className="front-hero"><div><span>Suivi accueil en temps réel</span><strong>{ready.length} CIF prêts · {notReady.length} CIF pas OK</strong></div><div className="front-hero-actions">
-      {changedCleanIds.size > 0 && <span className="front-changes-summary"><RefreshCw size={15} />{changedCleanIds.size} statut{changedCleanIds.size > 1 ? 's' : ''} Clean modifié{changedCleanIds.size > 1 ? 's' : ''}</span>}
+    <section className="front-hero"><div><span>Suivi accueil en temps réel</span><strong>{ready.length} CIF prêts · {notReady.length} CIF pas OK</strong><small>Les états de nettoyage affichés ici sont indépendants du Back Office.</small></div><div className="front-hero-actions">
+      <input ref={cleanFileRef} hidden type="file" accept=".xlsx,.xls,.csv" onChange={(event) => event.target.files?.[0] && void onCleanImport(event.target.files[0])} />
+      {canEdit && <button className="front-clean-import" disabled={cleanImporting || cleanSetupMissing} onClick={() => cleanFileRef.current?.click()}><Upload size={15} />{cleanImporting ? 'Comparaison…' : 'Mettre à jour les états'}</button>}
+      {changedCleanIds.size > 0 && <button className="front-validate-all" disabled={!canEdit || cleanValidating} onClick={() => void onAcknowledgeAllClean()}><CircleCheck size={15} />{cleanValidating ? 'Validation…' : `Valider les ${changedCleanIds.size} changement${changedCleanIds.size > 1 ? 's' : ''}`}</button>}
       <label className="front-sort"><ArrowUpDown size={15} /><select value={frontSort} onChange={(event) => setFrontSort(event.target.value as 'name' | 'pitch')}><option value="name">Nom</option><option value="pitch">Emplacement</option></select></label>
       <div className="front-search"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Nom, réservation ou emplacement…" /></div></div></section>
-    {setupMissing && <div className="front-setup-warning"><AlertTriangle size={18} /><div><strong>Une étape Supabase est nécessaire</strong><span>Exécutez le fichier <code>supabase/front_office_v2.sql</code> une seule fois pour activer l’état Clean et les contrôles Plan, Clé, Macaron, Bracelets et Chien.</span></div></div>}
+    {cleanSetupMissing && <div className="front-setup-warning"><AlertTriangle size={18} /><div><strong>Activez les états indépendants du Front</strong><span>Exécutez une seule fois <code>supabase/front_clean_independent.sql</code> dans Supabase. Cette migration ne modifie pas les données du Back Office.</span></div></div>}
+    {checksSetupMissing && <div className="front-setup-warning"><AlertTriangle size={18} /><div><strong>Les cases d’accueil ne sont pas encore configurées</strong><span>Exécutez le fichier <code>supabase/front_office_v2.sql</code> une seule fois pour activer Plan, Clé + macaron, Bracelets, Chien et Vérification.</span></div></div>}
+    {changedCleanIds.size > 0 && <div className="front-clean-alert"><RefreshCw size={16} /><span>Les lignes orange ont changé depuis le dernier état validé. Elles resteront signalées jusqu’à leur validation.</span></div>}
     {canEdit && visibleIds.length > 0 && <section className={`front-bulk-toolbar ${selectedVisibleIds.length ? 'has-selection' : ''}`}>
       <button className={`front-select-all ${allVisibleSelected ? 'selected' : ''}`} onClick={() => toggleRowsSelection(visibleIds)}><span className="front-select-box">{allVisibleSelected && <Check size={14} />}</span>{allVisibleSelected ? 'Tout désélectionner' : `Sélectionner les ${visibleIds.length} réservations affichées`}</button>
       {selectedVisibleIds.length > 0 && <><div className="front-bulk-summary"><strong>{selectedVisibleIds.length}</strong><span>sélectionnée{selectedVisibleIds.length > 1 ? 's' : ''}</span></div><div className="front-bulk-divider" /><span className="front-bulk-label">Appliquer à la sélection</span><div className="front-bulk-actions">{orderedTypes.map((type) => {
@@ -905,8 +1080,8 @@ function FrontOfficeView({ rows, query, setQuery, checked, frontCheckTypes, canE
       })}</div><button className="front-clear-selection" onClick={() => setSelectedIds(new Set())}><X size={14} />Effacer</button></>}
     </section>}
     <div className="front-boards">
-      <FrontBoard title="CIF prêts" subtitle="Dossiers validés par le Back Office" tone="ready" rows={ready} checked={checked} types={frontCheckTypes} canEdit={canEdit} onToggle={onToggle} selectedIds={selectedIds} onToggleSelection={toggleSelection} onToggleRowsSelection={toggleRowsSelection} changedCleanIds={changedCleanIds} />
-      <FrontBoard title="CIF pas OK" subtitle="En attente de validation du Back Office" tone="pending" rows={notReady} checked={checked} types={frontCheckTypes} canEdit={canEdit} onToggle={onToggle} selectedIds={selectedIds} onToggleSelection={toggleSelection} onToggleRowsSelection={toggleRowsSelection} changedCleanIds={changedCleanIds} />
+      <FrontBoard title="CIF prêts" subtitle="Dossiers validés par le Back Office" tone="ready" rows={ready} checked={checked} types={frontCheckTypes} canEdit={canEdit} onToggle={onToggle} selectedIds={selectedIds} onToggleSelection={toggleSelection} onToggleRowsSelection={toggleRowsSelection} changedCleanIds={changedCleanIds} onAcknowledgeClean={onAcknowledgeClean} />
+      <FrontBoard title="CIF pas OK" subtitle="En attente de validation du Back Office" tone="pending" rows={notReady} checked={checked} types={frontCheckTypes} canEdit={canEdit} onToggle={onToggle} selectedIds={selectedIds} onToggleSelection={toggleSelection} onToggleRowsSelection={toggleRowsSelection} changedCleanIds={changedCleanIds} onAcknowledgeClean={onAcknowledgeClean} />
     </div>
   </div>
 }
@@ -948,10 +1123,11 @@ function DayCheckRow({ row, canEdit, onToggle }: { row: FrontDayRow, canEdit: bo
   return <article className={`day-check-row ${row.is_verified ? 'is-ok' : ''} ${changed ? 'is-changed' : ''}`}><div className="day-check-client"><div className="avatar">{(row.firstname?.[0] ?? '?').toUpperCase()}{(row.lastname?.[0] ?? '').toUpperCase()}</div><div><h3>{(row.lastname ?? '').toUpperCase()} {row.firstname}{row.is_last_minute && <em className="day-last-minute">Last minute</em>}</h3><p><Hash size={13} />{row.reservation_number}</p><span className="front-location"><MapPin size={13} /><strong className="front-pitch">{row.pitch || 'Sans emplacement'}</strong><em>· {row.accommodation_type || 'Hébergement non renseigné'}</em></span></div></div><div className="day-check-clean">{changed && <span className="status-change-label"><RefreshCw size={12} />Changement détecté</span>}<div className={`clean-status ${status} ${cleanStatusTone(status)}`} title={cleanStatusTone(status).includes('is-unknown') ? 'Statut inhabituel conservé et comparé normalement' : undefined}><Sparkles size={14} /><span>Clean</span><strong>{cleanLabel(status)}</strong></div>{changed && <small>{cleanLabel(previous)} <ChevronRight size={12} /> <strong>{cleanLabel(status)}</strong></small>}</div><button disabled={!canEdit} className={`day-ok-button ${row.is_verified ? 'checked' : ''}`} onClick={() => void onToggle()}>{row.is_verified ? <CircleCheck size={20} /> : <span className="empty-check" />}<span>{row.is_verified ? 'Vérifié' : 'Marquer OK'}</span></button></article>
 }
 
-function FrontBoard({ title, subtitle, tone, rows, checked, types, canEdit, onToggle, selectedIds, onToggleSelection, onToggleRowsSelection, changedCleanIds }: {
+function FrontBoard({ title, subtitle, tone, rows, checked, types, canEdit, onToggle, selectedIds, onToggleSelection, onToggleRowsSelection, changedCleanIds, onAcknowledgeClean }: {
   title: string, subtitle: string, tone: 'ready' | 'pending', rows: Reservation[], checked: (id: string, code: string) => boolean,
   types: CheckType[], canEdit: boolean, onToggle: (id: string, code: string) => Promise<void>, selectedIds: Set<string>,
   onToggleSelection: (id: string) => void, onToggleRowsSelection: (ids: string[]) => void, changedCleanIds: Set<string>,
+  onAcknowledgeClean: (reservationId: string) => Promise<void>,
 }) {
   const [showPrintOptions, setShowPrintOptions] = useState(false)
   const [printOptions, setPrintOptions] = useState<FrontPrintOptions>({ sort: 'name', client: true, reservation: true, pitch: true, accommodation: true, clean: true, checks: true })
@@ -961,13 +1137,14 @@ function FrontBoard({ title, subtitle, tone, rows, checked, types, canEdit, onTo
   const partiallySelected = selectedCount > 0 && !allSelected
   return <section className={`front-board ${tone}`}><header><div><span className="front-board-dot" /><div><h2>{title}</h2><p>{subtitle}</p></div></div><div className="front-board-actions">
     {canEdit && rows.length > 0 && <button className={`front-board-select ${allSelected ? 'selected' : ''} ${partiallySelected ? 'partial' : ''}`} onClick={() => onToggleRowsSelection(rowIds)} title={allSelected ? `Désélectionner toutes les réservations de ${title}` : `Sélectionner toutes les réservations de ${title}`}><span className="front-select-box">{allSelected ? <Check size={13} /> : partiallySelected ? <span className="front-select-minus" /> : null}</span><span>{allSelected ? 'Désélectionner' : 'Tout sélectionner'}</span></button>}
-    <div className="front-print-wrap"><button onClick={() => setShowPrintOptions((current) => !current)} disabled={!rows.length} title={`Choisir puis imprimer la liste ${title}`}><Printer size={15} />Imprimer<ChevronDown size={13} /></button>{showPrintOptions && <div className="front-print-options"><strong>Impression</strong><label>Ordre<select value={printOptions.sort} onChange={(event) => setPrintOptions((current) => ({ ...current, sort: event.target.value as 'name' | 'pitch' }))}><option value="name">Nom</option><option value="pitch">Emplacement</option></select></label>{([['client','Client'],['reservation','Réservation'],['pitch','Emplacement'],['accommodation','Hébergement'],['clean','Clean'],['checks','Cases accueil']] as const).map(([key,label]) => <label className="print-check" key={key}><input type="checkbox" checked={printOptions[key]} onChange={() => setPrintOptions((current) => ({ ...current, [key]: !current[key] }))} />{label}</label>)}<button className="print-confirm" onClick={() => { printFrontBoard(title, rows, checked, printOptions); setShowPrintOptions(false) }}><Printer size={14} />Lancer l’impression</button></div>}</div><strong>{rows.length}</strong></div></header><div className="front-board-columns"><span>Client</span><span>Préparation accueil</span></div><div className="front-board-list">{rows.map((row) => <FrontRow key={row.id} row={row} checked={checked} types={types} canEdit={canEdit} onToggle={onToggle} selected={selectedIds.has(row.id)} onToggleSelection={() => onToggleSelection(row.id)} cleanChanged={changedCleanIds.has(row.id)} />)}{!rows.length && <div className="front-empty">Aucune réservation dans cette liste.</div>}</div></section>
+    <div className="front-print-wrap"><button onClick={() => setShowPrintOptions((current) => !current)} disabled={!rows.length} title={`Choisir puis imprimer la liste ${title}`}><Printer size={15} />Imprimer<ChevronDown size={13} /></button>{showPrintOptions && <div className="front-print-options"><strong>Impression</strong><label>Ordre<select value={printOptions.sort} onChange={(event) => setPrintOptions((current) => ({ ...current, sort: event.target.value as 'name' | 'pitch' }))}><option value="name">Nom</option><option value="pitch">Emplacement</option></select></label>{([['client','Client'],['reservation','Réservation'],['pitch','Emplacement'],['accommodation','Hébergement'],['clean','Clean'],['checks','Cases accueil']] as const).map(([key,label]) => <label className="print-check" key={key}><input type="checkbox" checked={printOptions[key]} onChange={() => setPrintOptions((current) => ({ ...current, [key]: !current[key] }))} />{label}</label>)}<button className="print-confirm" onClick={() => { printFrontBoard(title, rows, checked, printOptions); setShowPrintOptions(false) }}><Printer size={14} />Lancer l’impression</button></div>}</div><strong>{rows.length}</strong></div></header><div className="front-board-columns"><span>Client</span><span>Préparation accueil</span></div><div className="front-board-list">{rows.map((row) => <FrontRow key={row.id} row={row} checked={checked} types={types} canEdit={canEdit} onToggle={onToggle} selected={selectedIds.has(row.id)} onToggleSelection={() => onToggleSelection(row.id)} cleanChanged={changedCleanIds.has(row.id)} onAcknowledgeClean={() => onAcknowledgeClean(row.id)} />)}{!rows.length && <div className="front-empty">Aucune réservation dans cette liste.</div>}</div></section>
 }
-function FrontRow({ row, checked, types, canEdit, onToggle, selected, onToggleSelection, cleanChanged }: { row: Reservation, checked: (id: string, code: string) => boolean, types: CheckType[], canEdit: boolean, onToggle: (id: string, code: string) => Promise<void>, selected: boolean, onToggleSelection: () => void, cleanChanged: boolean }) {
+function FrontRow({ row, checked, types, canEdit, onToggle, selected, onToggleSelection, cleanChanged, onAcknowledgeClean }: { row: Reservation, checked: (id: string, code: string) => boolean, types: CheckType[], canEdit: boolean, onToggle: (id: string, code: string) => Promise<void>, selected: boolean, onToggleSelection: () => void, cleanChanged: boolean, onAcknowledgeClean: () => Promise<void> }) {
   const iconByCode: Record<string, React.ReactNode> = { key_sticker: <KeyRound size={14} />, dog: <Dog size={14} />, plan: <MapIcon size={14} />, bracelets: <CircleCheck size={14} />, verification: <ClipboardCheck size={14} /> }
   const ordered = FRONT_CHECK_CODES.map((code) => types.find((type) => type.code === code)).filter(Boolean) as CheckType[]
   const cleanStatus = row.clean_status ?? 'non_renseigne'
-  return <article className={`front-row ${selected ? 'is-selected' : ''} ${cleanChanged ? 'clean-changed' : ''}`}><div className="front-client">{canEdit && <button className={`front-row-select ${selected ? 'selected' : ''}`} onClick={onToggleSelection} title={selected ? 'Retirer cette réservation de la sélection' : 'Sélectionner cette réservation'} aria-label={selected ? 'Désélectionner cette réservation' : 'Sélectionner cette réservation'}><span className="front-select-box">{selected && <Check size={14} />}</span></button>}<div className="avatar">{(row.firstname?.[0] ?? '?').toUpperCase()}{(row.lastname?.[0] ?? '').toUpperCase()}</div><div><h3>{(row.lastname ?? '').toUpperCase()} {row.firstname}{cleanChanged && <span className="clean-change-badge" title="L’état Clean a changé lors de la dernière mise à jour"><RefreshCw size={11} />Modifié</span>}</h3><p><Hash size={13} />{row.reservation_number}</p><span className="front-location"><MapPin size={13} /><strong className="front-pitch">{row.pitch || 'Sans emplacement'}</strong><em>· {row.accommodation_type || 'Hébergement non renseigné'}</em></span></div></div><div className="front-preparation"><div className={`clean-status ${cleanStatus} ${cleanStatusTone(cleanStatus)}`} title={cleanStatusTone(cleanStatus).includes('is-unknown') ? 'Statut inhabituel conservé et comparé normalement' : 'État mis à jour par le tableau des logements'}><Sparkles size={14} /><span>Clean</span><strong>{cleanLabel(cleanStatus)}</strong></div><div className="front-checks">{ordered.map((type) => <button key={type.id} disabled={!canEdit} title={canEdit ? type.label : `${type.label} — lecture seule`} className={`front-check check-${type.code} ${checked(row.id, type.code) ? 'checked' : ''}`} onClick={() => void onToggle(row.id, type.code)}>{iconByCode[type.code] ?? <Check size={14} />}<span>{type.label}</span>{checked(row.id, type.code) && <Check className="front-check-tick" size={13} />}</button>)}</div></div></article>
+  const previousStatus = row.clean_previous_status ?? 'non_renseigne'
+  return <article className={`front-row ${selected ? 'is-selected' : ''} ${cleanChanged ? 'clean-changed' : ''}`}><div className="front-client">{canEdit && <button className={`front-row-select ${selected ? 'selected' : ''}`} onClick={onToggleSelection} title={selected ? 'Retirer cette réservation de la sélection' : 'Sélectionner cette réservation'} aria-label={selected ? 'Désélectionner cette réservation' : 'Sélectionner cette réservation'}><span className="front-select-box">{selected && <Check size={14} />}</span></button>}<div className="avatar">{(row.firstname?.[0] ?? '?').toUpperCase()}{(row.lastname?.[0] ?? '').toUpperCase()}</div><div><h3>{(row.lastname ?? '').toUpperCase()} {row.firstname}{cleanChanged && <span className="clean-change-badge" title="L’état de nettoyage a changé"><RefreshCw size={11} />Modifié</span>}</h3><p><Hash size={13} />{row.reservation_number}</p><span className="front-location"><MapPin size={13} /><strong className="front-pitch">{row.pitch || 'Sans emplacement'}</strong><em>· {row.accommodation_type || 'Hébergement non renseigné'}</em></span></div></div><div className="front-preparation"><div className={`front-clean-panel ${cleanChanged ? 'has-change' : ''}`}><div className={`clean-status ${cleanStatus} ${cleanStatusTone(cleanStatus)}`} title={cleanStatusTone(cleanStatus).includes('is-unknown') ? 'Statut inhabituel conservé et comparé normalement' : 'État indépendant mis à jour depuis le Front Office'}><Sparkles size={14} /><span>Clean</span><strong>{cleanLabel(cleanStatus)}</strong></div>{cleanChanged && <><div className="front-clean-diff"><span>{cleanLabel(previousStatus)}</span><ChevronRight size={12} /><strong>{cleanLabel(cleanStatus)}</strong></div>{canEdit && <button className="front-clean-validate" onClick={() => void onAcknowledgeClean()}><Check size={13} />Valider</button>}</>}</div><div className="front-checks">{ordered.map((type) => <button key={type.id} disabled={!canEdit} title={canEdit ? type.label : `${type.label} — lecture seule`} className={`front-check check-${type.code} ${checked(row.id, type.code) ? 'checked' : ''}`} onClick={() => void onToggle(row.id, type.code)}>{iconByCode[type.code] ?? <Check size={14} />}<span>{type.label}</span>{checked(row.id, type.code) && <Check className="front-check-tick" size={13} />}</button>)}</div></div></article>
 }
 function QuickCheck({ label, checked, onClick, important = false }: { label: string, checked: boolean, onClick: (event: React.MouseEvent<HTMLButtonElement>) => void, important?: boolean }) {
   return <button onClick={onClick} className={`quick-check ${checked ? 'checked' : ''} ${important ? 'important' : ''}`}>{checked ? <Check size={15} /> : <X size={15} />}<span>{label}</span></button>

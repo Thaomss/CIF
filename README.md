@@ -62,3 +62,15 @@ Le premier import crée la liste indépendante du Back Office. L’ordre des col
 États reconnus : `CLEAN`, `TO_BE_CLEANED`, `IN_PROGRESS`, `POSTPONED`, `TO_BE_CHECKED`, `CHECKED`, `TOUCH_UP` et `OCCUPIED_CLEAN`, avec plusieurs synonymes courants. Toute autre valeur est quand même importée, conservée, affichée avec un style « statut inhabituel » et comparée normalement lors des mises à jour suivantes.
 
 Quand une réservation regroupe plusieurs logements dans le même export, leurs emplacements et leurs états sont regroupés sous le même numéro de réservation.
+
+## États de nettoyage indépendants sur les tableaux CIF du Front
+
+Avant la première utilisation du bouton **Mettre à jour les états**, exécuter une seule fois dans Supabase SQL Editor :
+
+`supabase/front_clean_independent.sql`
+
+Cette table est séparée de `reservations` : aucun import effectué depuis les tableaux **CIF prêts** et **CIF pas OK** ne modifie les informations du Back Office.
+
+L’import retrouve les réservations uniquement grâce à leur numéro, indépendamment de l’ordre des colonnes. Le fichier doit contenir `Reservation Number` et `Cleaning Status`. Les numéros absents de la journée CIF sont ignorés et indiqués dans le bilan.
+
+Le premier état connu sert de référence sans alerte. Lorsqu’un import suivant contient un autre état, la réservation est surlignée en orange et l’ancien puis le nouvel état sont affichés. Le signal reste présent jusqu’au bouton **Valider**, ou jusqu’à **Valider les changements** pour tout confirmer en une fois. Les statuts inconnus restent acceptés et comparés normalement.
