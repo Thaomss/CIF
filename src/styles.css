@@ -909,3 +909,12 @@ select:focus-visible{
   .day-import-summary .modal-actions{align-items:stretch;flex-direction:column-reverse}
   .day-import-summary .modal-actions button{width:100%;justify-content:center}
 }
+
+/* Statuts de nettoyage inconnus : jamais bloquants, mais clairement identifiables. */
+.clean-status.is-unknown {
+  border-color: #d6b86b;
+  background: #fff9e9;
+  color: #8a641d;
+}
+.clean-status.is-unknown strong { color: #735116; }
+.clean-status.is-multi strong { white-space: normal; line-height: 1.15; }

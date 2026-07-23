@@ -78,48 +78,121 @@ type CleanImportResult = {
   unknownStatuses: string[]
   multiReservationCount: number
 }
+type CleanColumnKey = 'reservation' | 'firstname' | 'lastname' | 'pitch' | 'cleaning' | 'accommodation'
+type CleanColumnMap = Record<CleanColumnKey, number>
+
+const cleanColumnHeaders: Record<CleanColumnKey, readonly string[]> = {
+  reservation: [
+    'Reservation Number', 'Numéro de réservation', 'Numero de reservation', 'Reservation No', 'Booking Number',
+    'N° réservation', 'N° de réservation', 'No réservation', 'Num reservation', 'N° résa', 'Numero resa', 'Reservation #',
+  ],
+  firstname: ['Customer First Name', 'Prénom', 'Prenom', 'First Name', 'Firstname', 'Client First Name'],
+  lastname: ['Customer Last Name', 'Nom', 'Last Name', 'Lastname', 'Client Last Name'],
+  pitch: ['Unit Name', 'Emplacement', 'Pitch', 'Unit', 'Numéro emplacement', 'Numero emplacement', 'N° emplacement'],
+  cleaning: [
+    'Cleaning Status', 'Statut nettoyage', 'Etat nettoyage', 'État nettoyage', 'Cleaning', 'Cleaning State',
+    'Housekeeping Status', 'Etat du cleaning', 'État du cleaning',
+  ],
+  accommodation: ['Accommodation Type', 'Type d hébergement', 'Type hébergement', 'Accommodation', 'Hébergement', 'Hebergement'],
+}
+
 const cleanStatusMap: Record<string, string> = {
   CLEAN: 'clean',
+  CLEANED: 'clean',
+  READY: 'clean',
+  READY_TO_USE: 'clean',
+  OK: 'clean',
   TO_BE_CLEANED: 'to_be_cleaned',
+  NOT_CLEAN: 'to_be_cleaned',
+  DIRTY: 'to_be_cleaned',
+  WAITING_CLEANING: 'to_be_cleaned',
   IN_PROGRESS: 'in_progress',
+  CLEANING: 'in_progress',
+  CLEANING_IN_PROGRESS: 'in_progress',
   POSTPONED: 'postponed',
+  DELAYED: 'postponed',
   TO_BE_CHECKED: 'to_be_checked',
+  TO_CHECK: 'to_be_checked',
+  CHECK_REQUIRED: 'to_be_checked',
   CHECKED: 'clean',
   TOUCH_UP: 'touch_up',
   OCCUPIED_CLEAN: 'occupied_clean',
+  OCCUPIED_AND_CLEAN: 'occupied_clean',
   PROPRE: 'clean',
   A_NETTOYER: 'to_be_cleaned',
+  NON_PROPRE: 'to_be_cleaned',
   EN_COURS: 'in_progress',
+  NETTOYAGE_EN_COURS: 'in_progress',
   REPORTE: 'postponed',
   A_CONTROLER: 'to_be_checked',
+  A_VERIFIER: 'to_be_checked',
   RETOUCHE: 'touch_up',
   OCCUPE_PROPRE: 'occupied_clean',
 }
+const knownCleanStatuses = new Set<string>([
+  'non_renseigne', 'propre', 'non_propre', 'en_cours', 'a_controler',
+  ...Object.values(cleanStatusMap),
+])
+
+function findHeaderIndex(headers: unknown[], aliases: readonly string[]) {
+  const normalizedAliases = new Set(aliases.map(normalizeHeader))
+  const compactAliases = new Set([...normalizedAliases].map((alias) => alias.replace(/\s+/g, '')))
+  return headers.findIndex((header) => {
+    const normalized = normalizeHeader(String(header ?? ''))
+    return normalizedAliases.has(normalized) || compactAliases.has(normalized.replace(/\s+/g, ''))
+  })
+}
+function buildCleanColumnMap(headers: unknown[]): CleanColumnMap {
+  return {
+    reservation: findHeaderIndex(headers, cleanColumnHeaders.reservation),
+    firstname: findHeaderIndex(headers, cleanColumnHeaders.firstname),
+    lastname: findHeaderIndex(headers, cleanColumnHeaders.lastname),
+    pitch: findHeaderIndex(headers, cleanColumnHeaders.pitch),
+    cleaning: findHeaderIndex(headers, cleanColumnHeaders.cleaning),
+    accommodation: findHeaderIndex(headers, cleanColumnHeaders.accommodation),
+  }
+}
+function cellAt(row: unknown[], index: number) {
+  return index >= 0 ? row[index] ?? '' : ''
+}
+function findCleanImportTable(workbook: XLSX.WorkBook) {
+  let best: { rows: unknown[][], headerRowIndex: number, columns: CleanColumnMap, score: number } | null = null
+
+  for (const sheetName of workbook.SheetNames) {
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[sheetName], {
+      header: 1,
+      defval: '',
+      raw: true,
+      blankrows: false,
+    })
+    const rowsToInspect = Math.min(rows.length, 75)
+    for (let headerRowIndex = 0; headerRowIndex < rowsToInspect; headerRowIndex += 1) {
+      const columns = buildCleanColumnMap(rows[headerRowIndex] ?? [])
+      if (columns.reservation < 0) continue
+      const recognizedColumns = Object.values(columns).filter((index) => index >= 0).length
+      const usefulColumns = [columns.firstname, columns.lastname, columns.pitch, columns.cleaning, columns.accommodation].filter((index) => index >= 0).length
+      if (usefulColumns < 2) continue
+      const score = recognizedColumns * 100 - headerRowIndex
+      if (!best || score > best.score) best = { rows, headerRowIndex, columns, score }
+    }
+  }
+
+  if (!best) {
+    throw new Error('Impossible de trouver les colonnes du contrôle journée. Le fichier doit contenir au minimum « Reservation Number » ainsi que les colonnes client, emplacement ou nettoyage.')
+  }
+  return best
+}
 function normalizeCleanStatus(value: unknown) {
-  const rawStatus = String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
-  if (!rawStatus) return { status: null, rawStatus: '' }
-  return { status: cleanStatusMap[rawStatus] ?? rawStatus.toLowerCase(), rawStatus }
+  const displayStatus = String(value ?? '').trim()
+  const rawStatus = displayStatus.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+  if (!rawStatus) return { status: null, rawStatus: '', displayStatus: '' }
+  return { status: cleanStatusMap[rawStatus] ?? rawStatus.toLowerCase(), rawStatus, displayStatus }
 }
 function parseCleanWorkbook(buffer: ArrayBuffer): CleanImportResult {
   const workbook = XLSX.read(buffer, { type: 'array' })
-  const reservationHeaders = ['Reservation Number', 'Numéro de réservation', 'Numero de reservation', 'Reservation No', 'Booking Number']
-  const cleaningHeaders = ['Cleaning Status', 'Statut nettoyage', 'Etat nettoyage', 'État nettoyage', 'Cleaning']
-  const normalizedReservationHeaders = reservationHeaders.map(normalizeHeader)
-  const normalizedCleaningHeaders = cleaningHeaders.map(normalizeHeader)
-  let raw: Record<string, unknown>[] = []
-
-  for (const sheetName of workbook.SheetNames) {
-    const candidate = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[sheetName], { defval: '', raw: true })
-    const headers = Object.keys(candidate[0] ?? {})
-    if (headers.some((header) => normalizedReservationHeaders.includes(normalizeHeader(header)))) {
-      raw = candidate
-      break
-    }
-    if (!raw.length && candidate.length) raw = candidate
-  }
-
-  const headers = Object.keys(raw[0] ?? {})
-  const hasCleaningColumn = headers.some((header) => normalizedCleaningHeaders.includes(normalizeHeader(header)))
+  const { rows: matrix, headerRowIndex, columns } = findCleanImportTable(workbook)
+  const raw = matrix.slice(headerRowIndex + 1)
+  const hasCleaningColumn = columns.cleaning >= 0
   const unique = new Map<string, CleanImportRow>()
   const unknownStatuses = new Set<string>()
   const multiReservations = new Set<string>()
@@ -133,18 +206,18 @@ function parseCleanWorkbook(buffer: ArrayBuffer): CleanImportResult {
     return `multi__${[...expand(first), ...expand(second)].sort().join('__')}`
   }
 
-  raw.filter((row) => Object.values(row).some((value) => value !== '' && value !== null && value !== undefined)).forEach((row) => {
-    const reservationNumber = reservationNumberValue(getCell(row, reservationHeaders))
+  raw.filter((row) => row.some((value) => value !== '' && value !== null && value !== undefined)).forEach((row) => {
+    const reservationNumber = reservationNumberValue(cellAt(row, columns.reservation))
     if (!reservationNumber) return
-    const { status: cleanStatus, rawStatus } = normalizeCleanStatus(getCell(row, cleaningHeaders))
-    if (rawStatus && !cleanStatusMap[rawStatus]) unknownStatuses.add(rawStatus)
+    const { status: cleanStatus, rawStatus, displayStatus } = normalizeCleanStatus(cellAt(row, columns.cleaning))
+    if (rawStatus && !cleanStatusMap[rawStatus]) unknownStatuses.add(displayStatus || rawStatus)
     const next: CleanImportRow = {
       reservation_number: reservationNumber,
       clean_status: cleanStatus,
-      firstname: String(getCell(row, ['Customer First Name', 'Prénom', 'Prenom', 'First Name'])).trim() || null,
-      lastname: String(getCell(row, ['Customer Last Name', 'Nom', 'Last Name'])).trim() || null,
-      accommodation_type: String(getCell(row, ['Accommodation Type', 'Type d hébergement', 'Type hébergement', 'Accommodation'])).trim() || null,
-      pitch: String(getCell(row, ['Unit Name', 'Emplacement', 'Pitch', 'Unit'])).trim() || null,
+      firstname: String(cellAt(row, columns.firstname)).trim() || null,
+      lastname: String(cellAt(row, columns.lastname)).trim() || null,
+      accommodation_type: String(cellAt(row, columns.accommodation)).trim() || null,
+      pitch: String(cellAt(row, columns.pitch)).trim() || null,
     }
     const previous = unique.get(reservationNumber)
     if (!previous) {
@@ -165,7 +238,7 @@ function parseCleanWorkbook(buffer: ArrayBuffer): CleanImportResult {
   return {
     rows: [...unique.values()],
     hasCleaningStatuses: hasCleaningColumn,
-    unknownStatuses: [...unknownStatuses].sort(),
+    unknownStatuses: [...unknownStatuses].sort((first, second) => first.localeCompare(second, 'fr')),
     multiReservationCount: multiReservations.size,
   }
 }
@@ -697,9 +770,17 @@ export default function App() {
       <div className="drawer-danger"><button className="danger-button" onClick={() => void deleteReservation(selected)}><Trash2 size={16} />Supprimer cette réservation</button></div>
     </aside></div>}
     {importSummary && <div className="modal-backdrop" onMouseDown={() => setImportSummary(null)}><section className="modal import-summary" onMouseDown={(e) => e.stopPropagation()}><div className="summary-icon"><CircleCheck size={28} /></div><h2>Mise à jour terminée</h2><p>Les informations du fichier ont été fusionnées. Les coches, notes et statuts ont été conservés.</p><div className="summary-lines"><div><RefreshCw size={17} /><span>{importSummary.updated} réservations mises à jour</span></div><div><Plus size={17} /><span>{importSummary.added} nouvelles réservations ajoutées</span></div><div><AlertTriangle size={17} /><span>{importSummary.missing} réservations absentes, conservées</span></div></div><div className="modal-actions"><button className="primary" onClick={() => setImportSummary(null)}>Terminer</button></div></section></div>}
-    {cleanImportSummary && <div className="modal-backdrop"><section className="modal day-import-summary" onMouseDown={(e) => e.stopPropagation()}><div className="modal-icon success"><Sparkles size={24} /></div><h2>Contrôle journée mis à jour</h2><p>{cleanImportSummary.statusesProvided ? 'La liste et les états de nettoyage ont été comparés par numéro de réservation.' : 'La liste a été comparée par numéro de réservation. Ce fichier ne contient pas d’état de nettoyage : les états déjà connus ont été conservés.'} Le Back Office reste inchangé.</p><div className="summary-lines"><div><RefreshCw size={17} /><span>{cleanImportSummary.updated} réservations reconnues · {cleanImportSummary.changed} changement{cleanImportSummary.changed !== 1 ? 's' : ''} de nettoyage détecté{cleanImportSummary.changed !== 1 ? 's' : ''}</span></div><div><Plus size={17} /><span>{cleanImportSummary.added} nouvelle{cleanImportSummary.added !== 1 ? 's' : ''} réservation{cleanImportSummary.added !== 1 ? 's' : ''} ajoutée{cleanImportSummary.added !== 1 ? 's' : ''} avec la mention Last minute</span></div>{cleanImportSummary.missing > 0 && <div><AlertTriangle size={17} /><span>{cleanImportSummary.missing} réservation{cleanImportSummary.missing !== 1 ? 's sont' : ' est'} absente{cleanImportSummary.missing !== 1 ? 's' : ''} du nouveau fichier</span></div>}{cleanImportSummary.multiReservationCount > 0 && <div><Home size={17} /><span>{cleanImportSummary.multiReservationCount} réservation{cleanImportSummary.multiReservationCount > 1 ? 's regroupent' : ' regroupe'} plusieurs logements, conservés ensemble par numéro de réservation</span></div>}{cleanImportSummary.unknownStatuses.length > 0 && <div><AlertTriangle size={17} /><span>Statut{cleanImportSummary.unknownStatuses.length > 1 ? 's' : ''} inhabituel{cleanImportSummary.unknownStatuses.length > 1 ? 's' : ''} conservé{cleanImportSummary.unknownStatuses.length > 1 ? 's' : ''} : {cleanImportSummary.unknownStatuses.join(', ')}</span></div>}</div>{pendingMissingRows.length > 0 && <div className="missing-review"><div className="missing-review-heading"><div><strong>Réservations absentes du nouveau fichier</strong><span>Choisissez seulement celles à supprimer. Les autres seront gardées.</span></div><button type="button" onClick={() => setMissingRowsToDelete(new Set(pendingMissingRows.map((row) => row.id)))}>Tout sélectionner</button></div><div className="missing-review-list">{pendingMissingRows.map((row) => { const markedForDeletion = missingRowsToDelete.has(row.id); return <button type="button" key={row.id} className={markedForDeletion ? 'delete-selected' : ''} onClick={() => toggleMissingRowDecision(row.id)}><span className="missing-review-check">{markedForDeletion ? <Trash2 size={14} /> : <Check size={14} />}</span><span><strong>{(row.lastname ?? '').toUpperCase()} {row.firstname}</strong><small>{row.reservation_number} · emplacement {row.pitch || '—'}</small></span><em>{markedForDeletion ? 'Supprimer' : 'Garder'}</em></button> })}</div></div>}<div className="modal-actions">{pendingMissingRows.length > 0 ? <><button className="secondary" onClick={() => void resolveMissingRows('keep_all')}>Tout garder</button><button className="primary" onClick={() => void resolveMissingRows('apply')}>Valider les choix{missingRowsToDelete.size > 0 ? ` · ${missingRowsToDelete.size} à supprimer` : ''}</button></> : <button className="primary" onClick={() => void resolveMissingRows('keep_all')}>Terminer</button>}</div></section></div>}
+    {cleanImportSummary && <div className="modal-backdrop"><section className="modal day-import-summary" onMouseDown={(e) => e.stopPropagation()}><div className="modal-icon success"><Sparkles size={24} /></div><h2>Contrôle journée mis à jour</h2><p>{cleanImportSummary.statusesProvided ? 'La liste et les états de nettoyage ont été comparés par numéro de réservation.' : 'La liste a été comparée par numéro de réservation. Ce fichier ne contient pas d’état de nettoyage : les états déjà connus ont été conservés.'} Le Back Office reste inchangé.</p><div className="summary-lines"><div><RefreshCw size={17} /><span>{cleanImportSummary.updated} réservations reconnues · {cleanImportSummary.changed} changement{cleanImportSummary.changed !== 1 ? 's' : ''} de nettoyage détecté{cleanImportSummary.changed !== 1 ? 's' : ''}</span></div><div><Plus size={17} /><span>{cleanImportSummary.added} nouvelle{cleanImportSummary.added !== 1 ? 's' : ''} réservation{cleanImportSummary.added !== 1 ? 's' : ''} ajoutée{cleanImportSummary.added !== 1 ? 's' : ''} avec la mention Last minute</span></div>{cleanImportSummary.missing > 0 && <div><AlertTriangle size={17} /><span>{cleanImportSummary.missing} réservation{cleanImportSummary.missing !== 1 ? 's sont' : ' est'} absente{cleanImportSummary.missing !== 1 ? 's' : ''} du nouveau fichier</span></div>}{cleanImportSummary.multiReservationCount > 0 && <div><Home size={17} /><span>{cleanImportSummary.multiReservationCount} réservation{cleanImportSummary.multiReservationCount > 1 ? 's regroupent' : ' regroupe'} plusieurs logements, conservés ensemble par numéro de réservation</span></div>}{cleanImportSummary.unknownStatuses.length > 0 && <div><AlertTriangle size={17} /><span>Statut{cleanImportSummary.unknownStatuses.length > 1 ? 's' : ''} inhabituel{cleanImportSummary.unknownStatuses.length > 1 ? 's' : ''} accepté{cleanImportSummary.unknownStatuses.length > 1 ? 's' : ''} et comparé{cleanImportSummary.unknownStatuses.length > 1 ? 's' : ''} normalement : {cleanImportSummary.unknownStatuses.join(', ')}</span></div>}</div>{pendingMissingRows.length > 0 && <div className="missing-review"><div className="missing-review-heading"><div><strong>Réservations absentes du nouveau fichier</strong><span>Choisissez seulement celles à supprimer. Les autres seront gardées.</span></div><button type="button" onClick={() => setMissingRowsToDelete(new Set(pendingMissingRows.map((row) => row.id)))}>Tout sélectionner</button></div><div className="missing-review-list">{pendingMissingRows.map((row) => { const markedForDeletion = missingRowsToDelete.has(row.id); return <button type="button" key={row.id} className={markedForDeletion ? 'delete-selected' : ''} onClick={() => toggleMissingRowDecision(row.id)}><span className="missing-review-check">{markedForDeletion ? <Trash2 size={14} /> : <Check size={14} />}</span><span><strong>{(row.lastname ?? '').toUpperCase()} {row.firstname}</strong><small>{row.reservation_number} · emplacement {row.pitch || '—'}</small></span><em>{markedForDeletion ? 'Supprimer' : 'Garder'}</em></button> })}</div></div>}<div className="modal-actions">{pendingMissingRows.length > 0 ? <><button className="secondary" onClick={() => void resolveMissingRows('keep_all')}>Tout garder</button><button className="primary" onClick={() => void resolveMissingRows('apply')}>Valider les choix{missingRowsToDelete.size > 0 ? ` · ${missingRowsToDelete.size} à supprimer` : ''}</button></> : <button className="primary" onClick={() => void resolveMissingRows('keep_all')}>Terminer</button>}</div></section></div>}
     {showNewDay && <div className="modal-backdrop" onMouseDown={() => setShowNewDay(false)}><section className="modal" onMouseDown={(e) => e.stopPropagation()}><h2>Nouvelle journée d’arrivées</h2><p>Chaque journée conserve ses réservations, coches et notes.</p><label>Date du samedi<input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} /></label><div className="modal-actions"><button className="secondary" onClick={() => setShowNewDay(false)}>Annuler</button><button className="primary" disabled={!newDate} onClick={() => void createDay()}>Créer la journée</button></div></section></div>}
   </div>
+}
+
+function cleanStatusTone(status: string | null | undefined) {
+  const value = String(status ?? 'non_renseigne')
+  const isMulti = value.startsWith('multi__')
+  const statuses = isMulti ? value.slice(7).split('__') : [value]
+  const hasUnknown = statuses.some((item) => !knownCleanStatuses.has(item))
+  return [isMulti ? 'is-multi' : '', hasUnknown ? 'is-unknown' : ''].filter(Boolean).join(' ')
 }
 
 function cleanLabel(status: Reservation['clean_status']) {
@@ -862,7 +943,7 @@ function DayCheckRow({ row, canEdit, onToggle }: { row: FrontDayRow, canEdit: bo
   const status = row.clean_status ?? 'non_renseigne'
   const previous = row.clean_previous_status ?? 'non_renseigne'
   const changed = Boolean(row.clean_changed_at)
-  return <article className={`day-check-row ${row.is_verified ? 'is-ok' : ''} ${changed ? 'is-changed' : ''}`}><div className="day-check-client"><div className="avatar">{(row.firstname?.[0] ?? '?').toUpperCase()}{(row.lastname?.[0] ?? '').toUpperCase()}</div><div><h3>{(row.lastname ?? '').toUpperCase()} {row.firstname}{row.is_last_minute && <em className="day-last-minute">Last minute</em>}</h3><p><Hash size={13} />{row.reservation_number}</p><span className="front-location"><MapPin size={13} /><strong className="front-pitch">{row.pitch || 'Sans emplacement'}</strong><em>· {row.accommodation_type || 'Hébergement non renseigné'}</em></span></div></div><div className="day-check-clean">{changed && <span className="status-change-label"><RefreshCw size={12} />Changement détecté</span>}<div className={`clean-status ${status}`}><Sparkles size={14} /><span>Clean</span><strong>{cleanLabel(status)}</strong></div>{changed && <small>{cleanLabel(previous)} <ChevronRight size={12} /> <strong>{cleanLabel(status)}</strong></small>}</div><button disabled={!canEdit} className={`day-ok-button ${row.is_verified ? 'checked' : ''}`} onClick={() => void onToggle()}>{row.is_verified ? <CircleCheck size={20} /> : <span className="empty-check" />}<span>{row.is_verified ? 'Vérifié' : 'Marquer OK'}</span></button></article>
+  return <article className={`day-check-row ${row.is_verified ? 'is-ok' : ''} ${changed ? 'is-changed' : ''}`}><div className="day-check-client"><div className="avatar">{(row.firstname?.[0] ?? '?').toUpperCase()}{(row.lastname?.[0] ?? '').toUpperCase()}</div><div><h3>{(row.lastname ?? '').toUpperCase()} {row.firstname}{row.is_last_minute && <em className="day-last-minute">Last minute</em>}</h3><p><Hash size={13} />{row.reservation_number}</p><span className="front-location"><MapPin size={13} /><strong className="front-pitch">{row.pitch || 'Sans emplacement'}</strong><em>· {row.accommodation_type || 'Hébergement non renseigné'}</em></span></div></div><div className="day-check-clean">{changed && <span className="status-change-label"><RefreshCw size={12} />Changement détecté</span>}<div className={`clean-status ${status} ${cleanStatusTone(status)}`} title={cleanStatusTone(status).includes('is-unknown') ? 'Statut inhabituel conservé et comparé normalement' : undefined}><Sparkles size={14} /><span>Clean</span><strong>{cleanLabel(status)}</strong></div>{changed && <small>{cleanLabel(previous)} <ChevronRight size={12} /> <strong>{cleanLabel(status)}</strong></small>}</div><button disabled={!canEdit} className={`day-ok-button ${row.is_verified ? 'checked' : ''}`} onClick={() => void onToggle()}>{row.is_verified ? <CircleCheck size={20} /> : <span className="empty-check" />}<span>{row.is_verified ? 'Vérifié' : 'Marquer OK'}</span></button></article>
 }
 
 function FrontBoard({ title, subtitle, tone, rows, checked, types, canEdit, onToggle, selectedIds, onToggleSelection, onToggleRowsSelection, changedCleanIds }: {
@@ -884,7 +965,7 @@ function FrontRow({ row, checked, types, canEdit, onToggle, selected, onToggleSe
   const iconByCode: Record<string, React.ReactNode> = { key_sticker: <KeyRound size={14} />, dog: <Dog size={14} />, plan: <MapIcon size={14} />, bracelets: <CircleCheck size={14} />, verification: <ClipboardCheck size={14} /> }
   const ordered = FRONT_CHECK_CODES.map((code) => types.find((type) => type.code === code)).filter(Boolean) as CheckType[]
   const cleanStatus = row.clean_status ?? 'non_renseigne'
-  return <article className={`front-row ${selected ? 'is-selected' : ''} ${cleanChanged ? 'clean-changed' : ''}`}><div className="front-client">{canEdit && <button className={`front-row-select ${selected ? 'selected' : ''}`} onClick={onToggleSelection} title={selected ? 'Retirer cette réservation de la sélection' : 'Sélectionner cette réservation'} aria-label={selected ? 'Désélectionner cette réservation' : 'Sélectionner cette réservation'}><span className="front-select-box">{selected && <Check size={14} />}</span></button>}<div className="avatar">{(row.firstname?.[0] ?? '?').toUpperCase()}{(row.lastname?.[0] ?? '').toUpperCase()}</div><div><h3>{(row.lastname ?? '').toUpperCase()} {row.firstname}{cleanChanged && <span className="clean-change-badge" title="L’état Clean a changé lors de la dernière mise à jour"><RefreshCw size={11} />Modifié</span>}</h3><p><Hash size={13} />{row.reservation_number}</p><span className="front-location"><MapPin size={13} /><strong className="front-pitch">{row.pitch || 'Sans emplacement'}</strong><em>· {row.accommodation_type || 'Hébergement non renseigné'}</em></span></div></div><div className="front-preparation"><div className={`clean-status ${cleanStatus}`} title="État mis à jour par le tableau des logements"><Sparkles size={14} /><span>Clean</span><strong>{cleanLabel(cleanStatus)}</strong></div><div className="front-checks">{ordered.map((type) => <button key={type.id} disabled={!canEdit} title={canEdit ? type.label : `${type.label} — lecture seule`} className={`front-check check-${type.code} ${checked(row.id, type.code) ? 'checked' : ''}`} onClick={() => void onToggle(row.id, type.code)}>{iconByCode[type.code] ?? <Check size={14} />}<span>{type.label}</span>{checked(row.id, type.code) && <Check className="front-check-tick" size={13} />}</button>)}</div></div></article>
+  return <article className={`front-row ${selected ? 'is-selected' : ''} ${cleanChanged ? 'clean-changed' : ''}`}><div className="front-client">{canEdit && <button className={`front-row-select ${selected ? 'selected' : ''}`} onClick={onToggleSelection} title={selected ? 'Retirer cette réservation de la sélection' : 'Sélectionner cette réservation'} aria-label={selected ? 'Désélectionner cette réservation' : 'Sélectionner cette réservation'}><span className="front-select-box">{selected && <Check size={14} />}</span></button>}<div className="avatar">{(row.firstname?.[0] ?? '?').toUpperCase()}{(row.lastname?.[0] ?? '').toUpperCase()}</div><div><h3>{(row.lastname ?? '').toUpperCase()} {row.firstname}{cleanChanged && <span className="clean-change-badge" title="L’état Clean a changé lors de la dernière mise à jour"><RefreshCw size={11} />Modifié</span>}</h3><p><Hash size={13} />{row.reservation_number}</p><span className="front-location"><MapPin size={13} /><strong className="front-pitch">{row.pitch || 'Sans emplacement'}</strong><em>· {row.accommodation_type || 'Hébergement non renseigné'}</em></span></div></div><div className="front-preparation"><div className={`clean-status ${cleanStatus} ${cleanStatusTone(cleanStatus)}`} title={cleanStatusTone(cleanStatus).includes('is-unknown') ? 'Statut inhabituel conservé et comparé normalement' : 'État mis à jour par le tableau des logements'}><Sparkles size={14} /><span>Clean</span><strong>{cleanLabel(cleanStatus)}</strong></div><div className="front-checks">{ordered.map((type) => <button key={type.id} disabled={!canEdit} title={canEdit ? type.label : `${type.label} — lecture seule`} className={`front-check check-${type.code} ${checked(row.id, type.code) ? 'checked' : ''}`} onClick={() => void onToggle(row.id, type.code)}>{iconByCode[type.code] ?? <Check size={14} />}<span>{type.label}</span>{checked(row.id, type.code) && <Check className="front-check-tick" size={13} />}</button>)}</div></div></article>
 }
 function QuickCheck({ label, checked, onClick, important = false }: { label: string, checked: boolean, onClick: (event: React.MouseEvent<HTMLButtonElement>) => void, important?: boolean }) {
   return <button onClick={onClick} className={`quick-check ${checked ? 'checked' : ''} ${important ? 'important' : ''}`}>{checked ? <Check size={15} /> : <X size={15} />}<span>{label}</span></button>
