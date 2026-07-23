@@ -722,6 +722,8 @@ export default function App() {
   const selected = rows.find((row) => row.id === expanded) ?? null
   const canUseBack = profile?.role === 'admin' || profile?.role === 'back_office'
   const canEditFront = profile?.role === 'admin' || profile?.role === 'front_office'
+  // La gestion des journées est volontairement commune à tous les comptes connectés.
+  const canManageDays = signedIn
 
   if (!hasSupabase) return <main className="loading">Configuration Supabase manquante dans le fichier .env.</main>
   if (!authReady) return <main className="loading">Chargement…</main>
@@ -735,7 +737,7 @@ export default function App() {
         {(profile?.role === 'admin' || profile?.role === 'front_office' || profile?.role === 'direction') && <button className={workspace === 'front' ? 'active' : ''} onClick={() => { setWorkspace('front'); setExpanded(null) }}><UsersRound size={18} />Accueil arrivées</button>}
         {(profile?.role === 'admin' || profile?.role === 'front_office' || profile?.role === 'direction') && <button className={workspace === 'front_check' ? 'active' : ''} onClick={() => { setWorkspace('front_check'); setExpanded(null) }}><ClipboardCheck size={18} />Contrôle journée</button>}
       </nav>
-      <div className="session-block"><div className="session-title"><span>Journées</span>{canUseBack && <button title="Créer une journée" onClick={() => setShowNewDay(true)}><Plus size={15} /></button>}</div>
+      <div className="session-block"><div className="session-title"><span>Journées</span>{canManageDays && <button title="Créer une journée" onClick={() => setShowNewDay(true)}><Plus size={15} /></button>}</div>
         <div className="session-list">{days.map((item) => <button key={item.id} className={item.id === day?.id ? 'current' : ''} onClick={() => void chooseDay(item)}><CalendarDays size={15} /><span>{new Intl.DateTimeFormat('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(`${item.arrival_date}T12:00:00`))}</span></button>)}</div>
       </div>
       <div className="aside-bottom"><span className="connection live"><Wifi size={14} />Mise à jour en direct</span><span className="account-label">{profile?.display_name ?? profile?.username}</span><button className="ghost" onClick={() => supabase?.auth.signOut()}><LogOut size={17} />Déconnexion</button></div>
@@ -743,10 +745,10 @@ export default function App() {
 
     <main className="content">
       <header><div><p className="eyebrow">{workspace === 'front' ? 'ACCUEIL DES ARRIVÉES' : workspace === 'front_check' ? 'CONTRÔLE DE LA JOURNÉE' : 'JOURNÉE ACTIVE'}</p><h1>{day?.name ?? 'Aucune journée créée'}</h1><p>{workspace === 'front_check' ? frontDayRows.length : rows.length} réservations{day?.updated_at ? ` · Dernière mise à jour ${new Intl.DateTimeFormat('fr-FR', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(day.updated_at))}` : ''}</p></div>
-        {workspace === 'back' && canUseBack && <div className="header-actions"><input ref={fileRef} hidden type="file" accept=".xlsx,.xls,.csv" onChange={(e) => e.target.files?.[0] && void importFile(e.target.files[0])} /><button className="secondary" onClick={() => fileRef.current?.click()} disabled={!day || importing}><Upload size={17} />{importing ? 'Mise à jour…' : 'Mettre à jour les arrivées'}</button><button className="primary" onClick={() => void addManual()} disabled={!day}><Plus size={17} />Ajouter une réservation</button><button className="danger-button" onClick={() => void deleteCurrentDay()} disabled={!day}><Trash2 size={17} />Supprimer la journée</button></div>}
+        {canManageDays && <div className="header-actions">{workspace === 'back' && canUseBack && <><input ref={fileRef} hidden type="file" accept=".xlsx,.xls,.csv" onChange={(e) => e.target.files?.[0] && void importFile(e.target.files[0])} /><button className="secondary" onClick={() => fileRef.current?.click()} disabled={!day || importing}><Upload size={17} />{importing ? 'Mise à jour…' : 'Mettre à jour les arrivées'}</button><button className="primary" onClick={() => void addManual()} disabled={!day}><Plus size={17} />Ajouter une réservation</button></>}<button className="danger-button" onClick={() => void deleteCurrentDay()} disabled={!day}><Trash2 size={17} />Supprimer la journée</button></div>}
       </header>
       {error && <div className="error page-error">{error}</div>}
-      {!day ? <div className="empty"><h2>Aucune journée</h2><p>Créez le prochain samedi d’arrivées pour commencer.</p>{canUseBack && <button className="primary" onClick={() => setShowNewDay(true)}><Plus size={17} />Créer une journée</button>}</div> : workspace === 'front' ?
+      {!day ? <div className="empty"><h2>Aucune journée</h2><p>Créez le prochain samedi d’arrivées pour commencer.</p>{canManageDays && <button className="primary" onClick={() => setShowNewDay(true)}><Plus size={17} />Créer une journée</button>}</div> : workspace === 'front' ?
         <FrontOfficeView rows={rows} query={query} setQuery={setQuery} checked={checked} frontCheckTypes={frontCheckTypes} canEdit={canEditFront} onToggle={toggleCheck} onBulkSet={setChecksBulk} changedCleanIds={changedCleanIds} /> : workspace === 'front_check' ?
         <FrontDayCheckView rows={frontDayRows} query={query} setQuery={setQuery} canEdit={canEditFront} onToggle={toggleFrontDayRow} cleanFileRef={cleanFileRef} cleanImporting={cleanImporting} onCleanImport={importCleanFile} initialized={frontDayRows.length > 0} onResetChecks={resetDayChecks} /> :
         <>
