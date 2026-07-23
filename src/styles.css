@@ -1045,3 +1045,344 @@ select:focus-visible{
   .front-preparation{grid-template-columns:1fr}
   .front-clean-panel .clean-status{height:auto;min-height:46px}
 }
+
+/* Front Office — largeur maîtrisée et revue centralisée des changements */
+.front-boards{
+  gap:12px;
+}
+.front-board-list{
+  overflow-y:auto;
+  overflow-x:hidden;
+}
+.front-board-columns,
+.front-row{
+  grid-template-columns:minmax(158px,.78fr) minmax(0,1.22fr);
+  gap:10px;
+}
+.front-board-columns{
+  padding-left:13px;
+  padding-right:13px;
+}
+.front-row{
+  min-height:88px;
+  padding:11px 12px;
+}
+.front-client{
+  gap:7px;
+}
+.front-client .avatar{
+  flex-basis:36px;
+  width:36px;
+  height:36px;
+  border-radius:10px;
+  font-size:11px;
+}
+.front-row-select{
+  width:24px;
+  height:30px;
+}
+.front-row-select .front-select-box{
+  width:17px;
+  height:17px;
+}
+.front-client h3{
+  font-size:12px;
+}
+.front-client p,
+.front-client span{
+  font-size:9.8px;
+}
+.front-location .front-pitch{
+  min-height:21px;
+  padding:2px 6px;
+  font-size:12.5px;
+}
+.front-location em{
+  font-size:9.2px;
+}
+.front-preparation{
+  grid-template-columns:minmax(120px,.58fr) minmax(0,1.42fr);
+  gap:6px;
+  min-width:0;
+}
+.front-clean-panel{
+  display:block;
+  min-width:0;
+}
+.front-clean-panel .clean-status{
+  width:100%;
+  height:44px;
+  min-width:0;
+}
+.front-clean-panel.has-change{
+  padding:0;
+  border:0;
+  border-radius:0;
+  background:transparent;
+  box-shadow:none;
+}
+.front-clean-panel.has-change .clean-status{
+  border:1.5px solid #dfa83c;
+  background:#fffaf0;
+  box-shadow:0 0 0 3px rgba(223,168,60,.10);
+}
+.front-preparation .front-checks{
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:5px;
+  min-width:0;
+}
+.front-check{
+  min-width:0;
+  height:34px;
+  min-height:34px;
+  gap:4px;
+  padding:4px 5px;
+  font-size:9.7px;
+  line-height:1.05;
+}
+.front-check > svg:not(.front-check-tick){
+  width:12px;
+  height:12px;
+  flex:0 0 auto;
+}
+.front-check span{
+  display:block;
+  overflow:hidden;
+  white-space:normal;
+  text-overflow:clip;
+  line-height:1.05;
+}
+.front-check-tick{
+  width:11px;
+  height:11px;
+}
+.clean-change-badge{
+  margin-left:5px;
+  padding:2px 5px;
+  font-size:8px;
+}
+.front-row.focus-clean-change{
+  z-index:3;
+  animation:frontCleanFocus 1.9s ease both;
+}
+@keyframes frontCleanFocus{
+  0%,100%{box-shadow:inset 4px 0 #dc9c26}
+  18%,72%{box-shadow:inset 5px 0 #d48c08,0 0 0 4px rgba(231,170,47,.24),0 12px 26px rgba(120,78,8,.12)}
+}
+
+.front-changes-menu{
+  overflow:hidden;
+  border:1px solid #e1b65e;
+  border-radius:14px;
+  background:#fffaf0;
+  box-shadow:0 7px 22px rgba(125,84,13,.06);
+}
+.front-changes-toggle{
+  width:100%;
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr) auto;
+  align-items:center;
+  gap:10px;
+  padding:11px 13px;
+  border:0;
+  background:transparent;
+  color:#75500d;
+  text-align:left;
+}
+.front-changes-toggle:hover{
+  background:#fff5df;
+}
+.front-changes-toggle-icon{
+  display:grid;
+  place-items:center;
+  width:30px;
+  height:30px;
+  border-radius:9px;
+  background:#ffe8b8;
+  color:#966109;
+}
+.front-changes-toggle > span:nth-child(2){
+  display:grid;
+  gap:2px;
+  min-width:0;
+}
+.front-changes-toggle strong{
+  font-size:12px;
+  font-weight:900;
+}
+.front-changes-toggle small{
+  overflow:hidden;
+  color:#9a7a3a;
+  font-size:10.5px;
+  font-weight:650;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.front-changes-toggle > svg{
+  transition:transform .18s ease;
+}
+.front-changes-menu.is-open .front-changes-toggle > svg{
+  transform:rotate(180deg);
+}
+.front-changes-list{
+  display:grid;
+  max-height:290px;
+  overflow:auto;
+  border-top:1px solid #efd49c;
+  background:#fff;
+  scrollbar-width:thin;
+}
+.front-change-line{
+  display:grid;
+  grid-template-columns:minmax(190px,1.2fr) minmax(180px,.9fr) 82px auto;
+  align-items:center;
+  gap:12px;
+  min-height:54px;
+  padding:8px 12px;
+  border-bottom:1px solid #edf1ef;
+}
+.front-change-line:last-child{
+  border-bottom:0;
+}
+.front-change-line:hover{
+  background:#fffdf8;
+}
+.front-change-client{
+  display:grid;
+  gap:3px;
+  min-width:0;
+}
+.front-change-client > strong{
+  overflow:hidden;
+  color:#263d36;
+  font-size:11.5px;
+  font-weight:850;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.front-change-client > span{
+  display:flex;
+  align-items:center;
+  gap:5px;
+  min-width:0;
+  color:#7b8984;
+  font-size:9.5px;
+  white-space:nowrap;
+}
+.front-change-client b{
+  overflow:hidden;
+  margin-left:4px;
+  padding:2px 6px;
+  border-radius:6px;
+  background:#edf4f1;
+  color:#214f41;
+  font-size:10.5px;
+  font-weight:900;
+  text-overflow:ellipsis;
+}
+.front-change-transition{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);
+  align-items:center;
+  gap:6px;
+  min-width:0;
+}
+.front-change-transition span,
+.front-change-transition strong{
+  overflow:hidden;
+  padding:6px 8px;
+  border-radius:8px;
+  font-size:10px;
+  text-align:center;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.front-change-transition span{
+  border:1px solid #e1e6e4;
+  background:#f5f7f6;
+  color:#697773;
+  font-weight:750;
+}
+.front-change-transition strong{
+  border:1px solid #e2ad45;
+  background:#fff1d2;
+  color:#734b03;
+  font-weight:900;
+}
+.front-change-list-tag{
+  justify-self:start;
+  padding:5px 7px;
+  border-radius:999px;
+  font-size:9px;
+  font-weight:850;
+  white-space:nowrap;
+}
+.front-change-list-tag.ready{
+  background:#e8f5ef;
+  color:#24654e;
+}
+.front-change-list-tag.pending{
+  background:#fff2da;
+  color:#87570d;
+}
+.front-change-actions{
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:6px;
+}
+.front-change-actions button{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:5px;
+  min-height:30px;
+  padding:0 9px;
+  border:1px solid #d8e1de;
+  border-radius:8px;
+  background:#fff;
+  color:#51655e;
+  font:inherit;
+  font-size:9.5px;
+  font-weight:850;
+  white-space:nowrap;
+}
+.front-change-actions button:hover{
+  transform:translateY(-1px);
+  border-color:#9eb8ae;
+  box-shadow:0 4px 10px rgba(31,77,62,.08);
+}
+.front-change-actions button.validate{
+  border-color:#d89d31;
+  background:#f3bb52;
+  color:#543600;
+}
+.front-change-actions button.validate:hover{
+  background:#eeb044;
+}
+
+@media(max-width:1500px){
+  .front-board > header{padding:13px 12px}
+  .front-board-actions{gap:6px}
+  .front-board-actions > button{padding:0 7px}
+  .front-board h2{font-size:15px}
+  .front-board p{font-size:10px}
+  .front-row{grid-template-columns:minmax(150px,.76fr) minmax(0,1.24fr)}
+  .front-preparation{grid-template-columns:minmax(112px,.54fr) minmax(0,1.46fr)}
+  .front-check{font-size:9.3px;padding-left:4px;padding-right:4px}
+}
+@media(max-width:1150px){
+  .front-change-line{grid-template-columns:minmax(170px,1fr) minmax(170px,1fr) auto}
+  .front-change-list-tag{display:none}
+}
+@media(max-width:850px){
+  .front-change-line{grid-template-columns:1fr auto}
+  .front-change-transition{grid-column:1/-1;grid-row:2}
+  .front-change-actions{grid-column:2;grid-row:1}
+  .front-changes-toggle small{white-space:normal}
+  .front-row{padding:11px 12px}
+  .front-preparation{grid-template-columns:1fr}
+  .front-preparation .front-checks{grid-template-columns:repeat(3,minmax(0,1fr))}
+}
+/* Dans les lignes, la couleur de la case suffit à indiquer qu’elle est cochée et libère de la largeur. */
+.front-preparation .front-check-tick{display:none}
