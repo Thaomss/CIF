@@ -44,18 +44,21 @@ npm run dev
 
 Les scripts SQL nécessaires sont dans le dossier `supabase`. Exécute uniquement ceux qui n'ont pas encore été appliqués à ta base.
 
-## Mise à jour des logements — Front Office
-
-Dans l’espace Front Office, le bouton **Mettre à jour les logements** lit un fichier Excel contenant au minimum les colonnes `Reservation Number` et `Cleaning Status`.
-
-Le rapprochement se fait uniquement avec le numéro de réservation de la journée active. Cette action ne modifie ni les informations de réservation, ni les coches, notes ou statuts du Back Office.
-
-États reconnus : `CLEAN`, `TO_BE_CLEANED`, `IN_PROGRESS`, `POSTPONED`, `TO_BE_CHECKED`, `CHECKED` et `TOUCH_UP`.
-
 ## Contrôle journée Front Office
 
-Avant la première utilisation du nouvel écran **Contrôle journée**, exécuter une seule fois dans Supabase SQL Editor :
+Avant la première utilisation de l’écran **Contrôle journée**, exécuter une seule fois dans Supabase SQL Editor :
 
 `supabase/front_day_check.sql`
 
-Cet écran permet d'importer le tableau des logements comme point de départ, de cocher chaque pochette vérifiée et de repérer les changements de statut Clean lors des mises à jour suivantes.
+Le premier import crée la liste indépendante du Back Office. Le fichier doit contenir au minimum `Reservation Number` ; la colonne `Cleaning Status` peut être absente le matin.
+
+À chaque nouvel import, l’application compare les réservations par numéro :
+
+- une nouvelle réservation est ajoutée automatiquement avec la mention **Last minute** ;
+- une réservation absente est signalée et peut être gardée ou supprimée individuellement ;
+- un changement d’état de nettoyage remet uniquement cette réservation à vérifier et l’affiche en jaune ;
+- les réservations déjà vérifiées et dont l’état n’a pas changé restent validées.
+
+États reconnus : `CLEAN`, `TO_BE_CLEANED`, `IN_PROGRESS`, `POSTPONED`, `TO_BE_CHECKED`, `CHECKED`, `TOUCH_UP` et `OCCUPIED_CLEAN`. Les autres valeurs sont conservées et affichées au lieu d’être ignorées.
+
+Quand une réservation regroupe plusieurs logements dans le même export, leurs emplacements et leurs états sont regroupés sous le même numéro de réservation.

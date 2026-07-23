@@ -29,6 +29,17 @@ function numberValue(value: unknown) {
   if (typeof value === 'number') return value
   return Number(String(value).replace(/\s/g, '').replace(',', '.')) || 0
 }
+function reservationNumberValue(value: unknown) {
+  let normalized = ''
+  if (typeof value === 'number' && Number.isFinite(value)) normalized = Math.trunc(value).toString()
+  else normalized = String(value ?? '').trim().replace(/^['"]|['"]$/g, '').replace(/\s+/g, '').replace(/\.0+$/, '')
+  if (/^\d+(?:\.\d+)?e[+-]?\d+$/i.test(normalized)) {
+    const scientific = Number(normalized)
+    if (Number.isSafeInteger(scientific)) normalized = Math.trunc(scientific).toString()
+  }
+  if (/^\d+$/.test(normalized) && normalized.length >= 10 && normalized.length < 14) normalized = normalized.padStart(14, '0')
+  return normalized
+}
 type ImportReservation = Pick<Reservation, 'arrival_day_id' | 'reservation_number' | 'firstname' | 'lastname' | 'booking_channel' | 'remaining_amount' | 'accommodation_type' | 'pitch' | 'is_last_minute' | 'source'>
 function parseWorkbook(buffer: ArrayBuffer, arrivalDayId: string) {
   const workbook = XLSX.read(buffer, { type: 'array' })
@@ -53,7 +64,20 @@ function parseWorkbook(buffer: ArrayBuffer, arrivalDayId: string) {
   return [...unique.values()]
 }
 
-type CleanImportRow = { reservation_number: string, clean_status: string, firstname: string | null, lastname: string | null, accommodation_type: string | null, pitch: string | null }
+type CleanImportRow = {
+  reservation_number: string
+  clean_status: string | null
+  firstname: string | null
+  lastname: string | null
+  accommodation_type: string | null
+  pitch: string | null
+}
+type CleanImportResult = {
+  rows: CleanImportRow[]
+  hasCleaningStatuses: boolean
+  unknownStatuses: string[]
+  multiReservationCount: number
+}
 const cleanStatusMap: Record<string, string> = {
   CLEAN: 'clean',
   TO_BE_CLEANED: 'to_be_cleaned',
@@ -62,20 +86,88 @@ const cleanStatusMap: Record<string, string> = {
   TO_BE_CHECKED: 'to_be_checked',
   CHECKED: 'clean',
   TOUCH_UP: 'touch_up',
+  OCCUPIED_CLEAN: 'occupied_clean',
+  PROPRE: 'clean',
+  A_NETTOYER: 'to_be_cleaned',
+  EN_COURS: 'in_progress',
+  REPORTE: 'postponed',
+  A_CONTROLER: 'to_be_checked',
+  RETOUCHE: 'touch_up',
+  OCCUPE_PROPRE: 'occupied_clean',
 }
-function parseCleanWorkbook(buffer: ArrayBuffer) {
+function normalizeCleanStatus(value: unknown) {
+  const rawStatus = String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+  if (!rawStatus) return { status: null, rawStatus: '' }
+  return { status: cleanStatusMap[rawStatus] ?? rawStatus.toLowerCase(), rawStatus }
+}
+function parseCleanWorkbook(buffer: ArrayBuffer): CleanImportResult {
   const workbook = XLSX.read(buffer, { type: 'array' })
-  const sheet = workbook.Sheets[workbook.SheetNames[0]]
-  const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: true })
+  const reservationHeaders = ['Reservation Number', 'Numéro de réservation', 'Numero de reservation', 'Reservation No', 'Booking Number']
+  const cleaningHeaders = ['Cleaning Status', 'Statut nettoyage', 'Etat nettoyage', 'État nettoyage', 'Cleaning']
+  const normalizedReservationHeaders = reservationHeaders.map(normalizeHeader)
+  const normalizedCleaningHeaders = cleaningHeaders.map(normalizeHeader)
+  let raw: Record<string, unknown>[] = []
+
+  for (const sheetName of workbook.SheetNames) {
+    const candidate = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[sheetName], { defval: '', raw: true })
+    const headers = Object.keys(candidate[0] ?? {})
+    if (headers.some((header) => normalizedReservationHeaders.includes(normalizeHeader(header)))) {
+      raw = candidate
+      break
+    }
+    if (!raw.length && candidate.length) raw = candidate
+  }
+
+  const headers = Object.keys(raw[0] ?? {})
+  const hasCleaningColumn = headers.some((header) => normalizedCleaningHeaders.includes(normalizeHeader(header)))
   const unique = new Map<string, CleanImportRow>()
-  raw.filter((row) => Object.values(row).some(Boolean)).forEach((row) => {
-    const reservationNumber = String(getCell(row, ['Reservation Number', 'Numéro de réservation', 'Numero de reservation'])).trim()
-    const rawStatus = String(getCell(row, ['Cleaning Status', 'Statut nettoyage', 'Etat nettoyage', 'État nettoyage'])).trim().toUpperCase().replace(/[\s-]+/g, '_')
-    if (!reservationNumber || !rawStatus) return
-    const cleanStatus = cleanStatusMap[rawStatus]
-    if (cleanStatus) unique.set(reservationNumber, { reservation_number: reservationNumber, clean_status: cleanStatus, firstname: String(getCell(row, ['Customer First Name', 'Prénom', 'Prenom', 'First Name'])).trim() || null, lastname: String(getCell(row, ['Customer Last Name', 'Nom', 'Last Name'])).trim() || null, accommodation_type: String(getCell(row, ['Accommodation Type', 'Type d hébergement', 'Type hébergement', 'Accommodation'])).trim() || null, pitch: String(getCell(row, ['Unit Name', 'Emplacement', 'Pitch', 'Unit'])).trim() || null })
+  const unknownStatuses = new Set<string>()
+  const multiReservations = new Set<string>()
+
+  const mergeText = (first: string | null, second: string | null) => {
+    const values = [first, second].filter((value): value is string => Boolean(value))
+    return [...new Set(values)].join(' + ') || null
+  }
+  const mergeStatuses = (first: string | null, second: string | null) => {
+    const expand = (status: string | null) => status?.startsWith('multi__') ? status.slice(7).split('__') : [status ?? 'non_renseigne']
+    return `multi__${[...expand(first), ...expand(second)].sort().join('__')}`
+  }
+
+  raw.filter((row) => Object.values(row).some((value) => value !== '' && value !== null && value !== undefined)).forEach((row) => {
+    const reservationNumber = reservationNumberValue(getCell(row, reservationHeaders))
+    if (!reservationNumber) return
+    const { status: cleanStatus, rawStatus } = normalizeCleanStatus(getCell(row, cleaningHeaders))
+    if (rawStatus && !cleanStatusMap[rawStatus]) unknownStatuses.add(rawStatus)
+    const next: CleanImportRow = {
+      reservation_number: reservationNumber,
+      clean_status: cleanStatus,
+      firstname: String(getCell(row, ['Customer First Name', 'Prénom', 'Prenom', 'First Name'])).trim() || null,
+      lastname: String(getCell(row, ['Customer Last Name', 'Nom', 'Last Name'])).trim() || null,
+      accommodation_type: String(getCell(row, ['Accommodation Type', 'Type d hébergement', 'Type hébergement', 'Accommodation'])).trim() || null,
+      pitch: String(getCell(row, ['Unit Name', 'Emplacement', 'Pitch', 'Unit'])).trim() || null,
+    }
+    const previous = unique.get(reservationNumber)
+    if (!previous) {
+      unique.set(reservationNumber, next)
+      return
+    }
+    multiReservations.add(reservationNumber)
+    unique.set(reservationNumber, {
+      reservation_number: reservationNumber,
+      clean_status: mergeStatuses(previous.clean_status, next.clean_status),
+      firstname: previous.firstname ?? next.firstname,
+      lastname: previous.lastname ?? next.lastname,
+      accommodation_type: mergeText(previous.accommodation_type, next.accommodation_type),
+      pitch: mergeText(previous.pitch, next.pitch),
+    })
   })
-  return [...unique.values()]
+
+  return {
+    rows: [...unique.values()],
+    hasCleaningStatuses: hasCleaningColumn,
+    unknownStatuses: [...unknownStatuses].sort(),
+    multiReservationCount: multiReservations.size,
+  }
 }
 function formatDay(date: string) {
   return new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(`${date}T12:00:00`))
@@ -160,8 +252,9 @@ export default function App() {
   const [error, setError] = useState('')
   const [importSummary, setImportSummary] = useState<{ total: number, added: number, updated: number, missing: number } | null>(null)
   const [cleanImporting, setCleanImporting] = useState(false)
-  const [cleanImportSummary, setCleanImportSummary] = useState<{ updated: number, changed: number, added: number, missing: number } | null>(null)
+  const [cleanImportSummary, setCleanImportSummary] = useState<{ updated: number, changed: number, added: number, missing: number, statusesProvided: boolean, unknownStatuses: string[], multiReservationCount: number } | null>(null)
   const [pendingMissingRows, setPendingMissingRows] = useState<FrontDayRow[]>([])
+  const [missingRowsToDelete, setMissingRowsToDelete] = useState<Set<string>>(new Set())
   const [cleanTracking, setCleanTracking] = useState(false)
   const [cleanBaselineReady, setCleanBaselineReady] = useState(false)
   const [changedCleanIds, setChangedCleanIds] = useState<Set<string>>(new Set())
@@ -341,8 +434,8 @@ export default function App() {
     try {
       const parsed = parseWorkbook(await file.arrayBuffer(), day.id)
       if (!parsed.length) throw new Error('Aucune réservation reconnue dans ce fichier.')
-      const existingNumbers = new Set(rows.filter((row) => !row.is_last_minute).map((row) => row.reservation_number))
-      const incomingNumbers = new Set(parsed.map((row) => row.reservation_number))
+      const existingNumbers = new Set<string>(rows.filter((row) => !row.is_last_minute).map((row) => row.reservation_number))
+      const incomingNumbers = new Set<string>(parsed.map((row) => row.reservation_number))
       const added = parsed.filter((row) => !existingNumbers.has(row.reservation_number)).length
       const updated = parsed.length - added
       const missing = [...existingNumbers].filter((number) => !incomingNumbers.has(number)).length
@@ -359,15 +452,16 @@ export default function App() {
     if (!supabase || !day) return
     setCleanImporting(true); setCleanImportSummary(null)
     try {
-      const parsed = parseCleanWorkbook(await file.arrayBuffer())
-      if (!parsed.length) throw new Error('Aucun état de nettoyage reconnu. Le fichier doit contenir les colonnes Reservation Number et Cleaning Status.')
-      const existingByNumber = new Map(frontDayRows.map((row) => [row.reservation_number, row]))
+      const importResult = parseCleanWorkbook(await file.arrayBuffer())
+      const parsed = importResult.rows
+      if (!parsed.length) throw new Error('Aucune réservation reconnue. Le fichier doit au minimum contenir une colonne « Reservation Number ».')
+      const existingByNumber = new Map<string, FrontDayRow>(frontDayRows.map((row) => [reservationNumberValue(row.reservation_number), row] as const))
       const isFirstImport = frontDayRows.length === 0
       let updated = 0
       let changed = 0
       let added = 0
-      const incomingNumbers = new Set(parsed.map((item) => item.reservation_number))
-      const missingRows = isFirstImport ? [] : frontDayRows.filter((row) => !incomingNumbers.has(row.reservation_number))
+      const incomingNumbers = new Set<string>(parsed.map((item) => item.reservation_number))
+      const missingRows = isFirstImport ? [] : frontDayRows.filter((row) => !incomingNumbers.has(reservationNumberValue(row.reservation_number)))
 
       if (isFirstImport) {
         const payload = parsed.map((item) => ({
@@ -377,7 +471,7 @@ export default function App() {
           lastname: item.lastname,
           accommodation_type: item.accommodation_type,
           pitch: item.pitch,
-          clean_status: item.clean_status,
+          clean_status: item.clean_status ?? 'non_renseigne',
           clean_previous_status: null,
           clean_changed_at: null,
           is_verified: false,
@@ -389,8 +483,6 @@ export default function App() {
         }
         updated = payload.length
       } else {
-        const { error: clearError } = await supabase.from('front_day_rows').update({ clean_previous_status: null, clean_changed_at: null }).eq('arrival_day_id', day.id)
-        if (clearError) throw clearError
         for (const item of parsed) {
           const current = existingByNumber.get(item.reservation_number)
           if (!current) {
@@ -401,7 +493,7 @@ export default function App() {
               lastname: item.lastname,
               accommodation_type: item.accommodation_type,
               pitch: item.pitch,
-              clean_status: item.clean_status,
+              clean_status: item.clean_status ?? 'non_renseigne',
               clean_previous_status: null,
               clean_changed_at: null,
               is_verified: false,
@@ -411,16 +503,19 @@ export default function App() {
             added += 1
             continue
           }
+
           const previous = current.clean_status ?? 'non_renseigne'
-          const hasChanged = previous !== item.clean_status
+          const nextStatus = item.clean_status ?? previous
+          const hasKnownBaseline = previous !== 'non_renseigne'
+          const hasChanged = item.clean_status !== null && hasKnownBaseline && previous !== nextStatus
           const { error: updateError } = await supabase.from('front_day_rows').update({
             firstname: item.firstname ?? current.firstname,
             lastname: item.lastname ?? current.lastname,
             accommodation_type: item.accommodation_type ?? current.accommodation_type,
             pitch: item.pitch ?? current.pitch,
-            clean_status: item.clean_status,
-            clean_previous_status: hasChanged ? previous : null,
-            clean_changed_at: hasChanged ? new Date().toISOString() : null,
+            clean_status: nextStatus,
+            clean_previous_status: hasChanged ? previous : current.clean_previous_status,
+            clean_changed_at: hasChanged ? new Date().toISOString() : current.clean_changed_at,
             is_verified: hasChanged ? false : current.is_verified,
             updated_at: new Date().toISOString(),
           }).eq('id', current.id)
@@ -432,9 +527,18 @@ export default function App() {
 
       await loadFrontDayRows(day.id)
       setPendingMissingRows(missingRows)
+      setMissingRowsToDelete(new Set())
       setCleanBaselineReady(true)
       setCleanTracking(true)
-      setCleanImportSummary({ updated, changed, added, missing: missingRows.length })
+      setCleanImportSummary({
+        updated,
+        changed,
+        added,
+        missing: missingRows.length,
+        statusesProvided: importResult.hasCleaningStatuses,
+        unknownStatuses: importResult.unknownStatuses,
+        multiReservationCount: importResult.multiReservationCount,
+      })
     } catch (caught) {
       alert(describeError(caught, 'Impossible de mettre à jour le contrôle de journée.'))
     } finally {
@@ -471,15 +575,31 @@ export default function App() {
     if (updateError) { alert(updateError.message); await loadFrontDayRows(row.arrival_day_id) }
   }
 
-  async function resolveMissingRows(remove: boolean) {
+  function toggleMissingRowDecision(id: string) {
+    setMissingRowsToDelete((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  async function resolveMissingRows(mode: 'keep_all' | 'delete_all' | 'apply' = 'apply') {
     if (!supabase || !day) return
-    if (remove && pendingMissingRows.length) {
-      const ids = pendingMissingRows.map((row) => row.id)
-      const { error: deleteError } = await supabase.from('front_day_rows').delete().in('id', ids)
-      if (deleteError) { alert(deleteError.message); return }
+    const ids = mode === 'delete_all'
+      ? pendingMissingRows.map((row) => row.id)
+      : mode === 'keep_all'
+        ? []
+        : [...missingRowsToDelete]
+    if (ids.length) {
+      for (let index = 0; index < ids.length; index += 100) {
+        const { error: deleteError } = await supabase.from('front_day_rows').delete().in('id', ids.slice(index, index + 100))
+        if (deleteError) { alert(describeError(deleteError, 'Impossible de supprimer les réservations absentes.')); return }
+      }
       setFrontDayRows((current) => current.filter((row) => !ids.includes(row.id)))
     }
     setPendingMissingRows([])
+    setMissingRowsToDelete(new Set())
     setCleanImportSummary(null)
   }
 
@@ -577,7 +697,7 @@ export default function App() {
       <div className="drawer-danger"><button className="danger-button" onClick={() => void deleteReservation(selected)}><Trash2 size={16} />Supprimer cette réservation</button></div>
     </aside></div>}
     {importSummary && <div className="modal-backdrop" onMouseDown={() => setImportSummary(null)}><section className="modal import-summary" onMouseDown={(e) => e.stopPropagation()}><div className="summary-icon"><CircleCheck size={28} /></div><h2>Mise à jour terminée</h2><p>Les informations du fichier ont été fusionnées. Les coches, notes et statuts ont été conservés.</p><div className="summary-lines"><div><RefreshCw size={17} /><span>{importSummary.updated} réservations mises à jour</span></div><div><Plus size={17} /><span>{importSummary.added} nouvelles réservations ajoutées</span></div><div><AlertTriangle size={17} /><span>{importSummary.missing} réservations absentes, conservées</span></div></div><div className="modal-actions"><button className="primary" onClick={() => setImportSummary(null)}>Terminer</button></div></section></div>}
-    {cleanImportSummary && <div className="modal-backdrop"><section className="modal" onMouseDown={(e) => e.stopPropagation()}><div className="modal-icon success"><Sparkles size={24} /></div><h2>Contrôle journée mis à jour</h2><p>Les statuts Clean ont été comparés par numéro de réservation. Le Back Office reste inchangé.</p><div className="summary-lines"><div><RefreshCw size={17} /><span>{cleanImportSummary.updated} réservations mises à jour · {cleanImportSummary.changed} changement{cleanImportSummary.changed !== 1 ? 's' : ''} détecté{cleanImportSummary.changed !== 1 ? 's' : ''}</span></div><div><Plus size={17} /><span>{cleanImportSummary.added} nouvelle{cleanImportSummary.added !== 1 ? 's' : ''} réservation{cleanImportSummary.added !== 1 ? 's' : ''} ajoutée{cleanImportSummary.added !== 1 ? 's' : ''} avec la mention Last minute</span></div>{cleanImportSummary.missing > 0 && <div><AlertTriangle size={17} /><span>{cleanImportSummary.missing} réservation{cleanImportSummary.missing !== 1 ? 's sont' : ' est'} absente{cleanImportSummary.missing !== 1 ? 's' : ''} du nouveau fichier</span></div>}</div><div className="modal-actions">{cleanImportSummary.missing > 0 ? <><button className="secondary" onClick={() => void resolveMissingRows(false)}>Garder les absentes</button><button className="danger-button" onClick={() => void resolveMissingRows(true)}>Supprimer les absentes</button></> : <button className="primary" onClick={() => void resolveMissingRows(false)}>Terminer</button>}</div></section></div>}
+    {cleanImportSummary && <div className="modal-backdrop"><section className="modal day-import-summary" onMouseDown={(e) => e.stopPropagation()}><div className="modal-icon success"><Sparkles size={24} /></div><h2>Contrôle journée mis à jour</h2><p>{cleanImportSummary.statusesProvided ? 'La liste et les états de nettoyage ont été comparés par numéro de réservation.' : 'La liste a été comparée par numéro de réservation. Ce fichier ne contient pas d’état de nettoyage : les états déjà connus ont été conservés.'} Le Back Office reste inchangé.</p><div className="summary-lines"><div><RefreshCw size={17} /><span>{cleanImportSummary.updated} réservations reconnues · {cleanImportSummary.changed} changement{cleanImportSummary.changed !== 1 ? 's' : ''} de nettoyage détecté{cleanImportSummary.changed !== 1 ? 's' : ''}</span></div><div><Plus size={17} /><span>{cleanImportSummary.added} nouvelle{cleanImportSummary.added !== 1 ? 's' : ''} réservation{cleanImportSummary.added !== 1 ? 's' : ''} ajoutée{cleanImportSummary.added !== 1 ? 's' : ''} avec la mention Last minute</span></div>{cleanImportSummary.missing > 0 && <div><AlertTriangle size={17} /><span>{cleanImportSummary.missing} réservation{cleanImportSummary.missing !== 1 ? 's sont' : ' est'} absente{cleanImportSummary.missing !== 1 ? 's' : ''} du nouveau fichier</span></div>}{cleanImportSummary.multiReservationCount > 0 && <div><Home size={17} /><span>{cleanImportSummary.multiReservationCount} réservation{cleanImportSummary.multiReservationCount > 1 ? 's regroupent' : ' regroupe'} plusieurs logements, conservés ensemble par numéro de réservation</span></div>}{cleanImportSummary.unknownStatuses.length > 0 && <div><AlertTriangle size={17} /><span>Statut{cleanImportSummary.unknownStatuses.length > 1 ? 's' : ''} inhabituel{cleanImportSummary.unknownStatuses.length > 1 ? 's' : ''} conservé{cleanImportSummary.unknownStatuses.length > 1 ? 's' : ''} : {cleanImportSummary.unknownStatuses.join(', ')}</span></div>}</div>{pendingMissingRows.length > 0 && <div className="missing-review"><div className="missing-review-heading"><div><strong>Réservations absentes du nouveau fichier</strong><span>Choisissez seulement celles à supprimer. Les autres seront gardées.</span></div><button type="button" onClick={() => setMissingRowsToDelete(new Set(pendingMissingRows.map((row) => row.id)))}>Tout sélectionner</button></div><div className="missing-review-list">{pendingMissingRows.map((row) => { const markedForDeletion = missingRowsToDelete.has(row.id); return <button type="button" key={row.id} className={markedForDeletion ? 'delete-selected' : ''} onClick={() => toggleMissingRowDecision(row.id)}><span className="missing-review-check">{markedForDeletion ? <Trash2 size={14} /> : <Check size={14} />}</span><span><strong>{(row.lastname ?? '').toUpperCase()} {row.firstname}</strong><small>{row.reservation_number} · emplacement {row.pitch || '—'}</small></span><em>{markedForDeletion ? 'Supprimer' : 'Garder'}</em></button> })}</div></div>}<div className="modal-actions">{pendingMissingRows.length > 0 ? <><button className="secondary" onClick={() => void resolveMissingRows('keep_all')}>Tout garder</button><button className="primary" onClick={() => void resolveMissingRows('apply')}>Valider les choix{missingRowsToDelete.size > 0 ? ` · ${missingRowsToDelete.size} à supprimer` : ''}</button></> : <button className="primary" onClick={() => void resolveMissingRows('keep_all')}>Terminer</button>}</div></section></div>}
     {showNewDay && <div className="modal-backdrop" onMouseDown={() => setShowNewDay(false)}><section className="modal" onMouseDown={(e) => e.stopPropagation()}><h2>Nouvelle journée d’arrivées</h2><p>Chaque journée conserve ses réservations, coches et notes.</p><label>Date du samedi<input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} /></label><div className="modal-actions"><button className="secondary" onClick={() => setShowNewDay(false)}>Annuler</button><button className="primary" disabled={!newDate} onClick={() => void createDay()}>Créer la journée</button></div></section></div>}
   </div>
 }
@@ -590,9 +710,16 @@ function cleanLabel(status: Reservation['clean_status']) {
     postponed: 'Reporté',
     to_be_checked: 'À contrôler', a_controler: 'À contrôler',
     touch_up: 'Retouche',
+    occupied_clean: 'Occupé propre',
     non_renseigne: 'Non renseigné',
   }
-  return labels[status ?? 'non_renseigne'] ?? String(status ?? 'Non renseigné')
+  const value = String(status ?? 'non_renseigne')
+  const formatSingle = (item: string) => labels[item] ?? item.replace(/_/g, ' ').replace(/^./, (letter) => letter.toUpperCase())
+  if (value.startsWith('multi__')) {
+    const counts = value.slice(7).split('__').reduce<Record<string, number>>((result, item) => ({ ...result, [item]: (result[item] ?? 0) + 1 }), {})
+    return Object.entries(counts).map(([item, count]) => `${formatSingle(item)}${count > 1 ? ` ×${count}` : ''}`).join(' + ')
+  }
+  return formatSingle(value)
 }
 type FrontPrintOptions = {
   sort: 'name' | 'pitch'
@@ -721,9 +848,9 @@ function FrontDayCheckView({ rows, query, setQuery, canEdit, onToggle, cleanFile
   }), sort), [rows, needle, sort, view])
   const doneCount = rows.filter((row) => row.is_verified).length
   return <div className="day-check-workspace">
-    <section className="day-check-hero"><div><span>Contrôle physique des pochettes</span><strong>{doneCount} / {rows.length} vérifiées</strong><p>{initialized ? 'Cette liste est indépendante du Back Office. Les prochains fichiers mettront uniquement à jour les statuts Clean par numéro de réservation.' : 'Importez le tableau du jour pour créer cette liste indépendante.'}</p></div><div className="day-check-actions">
+    <section className="day-check-hero"><div><span>Contrôle physique des pochettes</span><strong>{doneCount} / {rows.length} vérifiées</strong><p>{initialized ? 'Cette liste est indépendante du Back Office. Les prochains fichiers seront comparés par numéro de réservation : nouveaux Last minute, réservations absentes et changements d’état de nettoyage.' : 'Importez le tableau du jour pour créer cette liste indépendante.'}</p></div><div className="day-check-actions">
       <input ref={cleanFileRef} hidden type="file" accept=".xlsx,.xls,.csv" onChange={(event) => event.target.files?.[0] && void onCleanImport(event.target.files[0])} />
-      <button className="primary" disabled={!canEdit || cleanImporting} onClick={() => cleanFileRef.current?.click()}><Upload size={16} />{cleanImporting ? 'Mise à jour…' : initialized ? 'Mettre à jour les statuts' : 'Importer le tableau du jour'}</button>
+      <button className="primary" disabled={!canEdit || cleanImporting} onClick={() => cleanFileRef.current?.click()}><Upload size={16} />{cleanImporting ? 'Mise à jour…' : initialized ? 'Mettre à jour la journée' : 'Importer le tableau du jour'}</button>
       <button className="secondary" disabled={!canEdit || !doneCount} onClick={() => void onResetChecks()}><RefreshCw size={16} />Réinitialiser les OK</button>
     </div></section>
     {changedCount > 0 && <div className="day-check-alert"><RefreshCw size={17} /><strong>{changedCount} logement{changedCount > 1 ? 's ont' : ' a'} changé de statut depuis la dernière mise à jour.</strong><button onClick={() => setView('changed')}>Les afficher</button></div>}
