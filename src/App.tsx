@@ -41,14 +41,67 @@ function reservationNumberValue(value: unknown) {
   return normalized
 }
 type ImportReservation = Pick<Reservation, 'arrival_day_id' | 'reservation_number' | 'firstname' | 'lastname' | 'booking_channel' | 'remaining_amount' | 'accommodation_type' | 'pitch' | 'is_last_minute' | 'source'>
+
+function normalizedIdentityPart(value: string | null | undefined) {
+  return String(value ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase('fr')
+    .replace(/[^a-z0-9]+/g, '')
+}
+function editDistance(first: string, second: string) {
+  if (first === second) return 0
+  if (!first) return second.length
+  if (!second) return first.length
+  const previous = Array.from({ length: second.length + 1 }, (_, index) => index)
+  for (let firstIndex = 1; firstIndex <= first.length; firstIndex += 1) {
+    const current = [firstIndex]
+    for (let secondIndex = 1; secondIndex <= second.length; secondIndex += 1) {
+      current[secondIndex] = Math.min(
+        current[secondIndex - 1] + 1,
+        previous[secondIndex] + 1,
+        previous[secondIndex - 1] + (first[firstIndex - 1] === second[secondIndex - 1] ? 0 : 1),
+      )
+    }
+    previous.splice(0, previous.length, ...current)
+  }
+  return previous[second.length]
+}
+function identityPartLooksSimilar(first: string | null, second: string | null) {
+  const left = normalizedIdentityPart(first)
+  const right = normalizedIdentityPart(second)
+  if (!left || !right) return true
+  if (left === right) return true
+  const longest = Math.max(left.length, right.length)
+  return longest >= 5 && editDistance(left, right) <= 1
+}
+function sameReservationIdentity(first: { firstname: string | null, lastname: string | null }, second: { firstname: string | null, lastname: string | null }) {
+  return identityPartLooksSimilar(first.firstname, second.firstname) && identityPartLooksSimilar(first.lastname, second.lastname)
+}
+function mergeDistinctText(first: string | null, second: string | null) {
+  const values = [first, second]
+    .flatMap((value) => String(value ?? '').split(' + '))
+    .map((value) => value.trim())
+    .filter(Boolean)
+  return [...new Set(values)].join(' + ') || null
+}
+function reservationIdentityLabel(row: { firstname: string | null, lastname: string | null }) {
+  return `${row.lastname ?? ''} ${row.firstname ?? ''}`.trim() || 'Client non renseigné'
+}
+function conflictingBasketError(number: string, first: { firstname: string | null, lastname: string | null, pitch: string | null }, second: { firstname: string | null, lastname: string | null, pitch: string | null }) {
+  return new Error(
+    `Numéro de réservation ${number} incohérent : « ${reservationIdentityLabel(first)} » (${first.pitch || 'sans emplacement'}) et « ${reservationIdentityLabel(second)} » (${second.pitch || 'sans emplacement'}). ` +
+    'Un panier est accepté uniquement lorsque le nom et le prénom correspondent et que les emplacements sont différents.',
+  )
+}
 function parseWorkbook(buffer: ArrayBuffer, arrivalDayId: string) {
   const workbook = XLSX.read(buffer, { type: 'array' })
   const sheet = workbook.Sheets[workbook.SheetNames[0]]
   const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: true })
   const unique = new Map<string, ImportReservation>()
   raw.filter((row) => Object.values(row).some(Boolean)).forEach((row, index) => {
-    const number = String(getCell(row, ['Reservation Number', 'Numéro de réservation', 'Numero de reservation'])).trim() || `MANQUANT-${index + 1}`
-    unique.set(number, {
+    const number = reservationNumberValue(getCell(row, ['Reservation Number', 'Numéro de réservation', 'Numero de reservation'])) || `MANQUANT-${index + 1}`
+    const next: ImportReservation = {
       arrival_day_id: arrivalDayId,
       reservation_number: number,
       firstname: String(getCell(row, ['Customer First Name', 'Prénom', 'Prenom'])).trim() || null,
@@ -59,6 +112,21 @@ function parseWorkbook(buffer: ArrayBuffer, arrivalDayId: string) {
       pitch: String(getCell(row, ['Unit Name', 'Emplacement'])).trim() || null,
       is_last_minute: false,
       source: 'import',
+    }
+    const previous = unique.get(number)
+    if (!previous) {
+      unique.set(number, next)
+      return
+    }
+    if (!sameReservationIdentity(previous, next)) throw conflictingBasketError(number, previous, next)
+    unique.set(number, {
+      ...previous,
+      firstname: previous.firstname ?? next.firstname,
+      lastname: previous.lastname ?? next.lastname,
+      booking_channel: mergeDistinctText(previous.booking_channel, next.booking_channel),
+      remaining_amount: Math.max(previous.remaining_amount ?? 0, next.remaining_amount ?? 0),
+      accommodation_type: mergeDistinctText(previous.accommodation_type, next.accommodation_type),
+      pitch: mergeDistinctText(previous.pitch, next.pitch),
     })
   })
   return [...unique.values()]
@@ -198,13 +266,11 @@ function parseCleanWorkbook(buffer: ArrayBuffer): CleanImportResult {
   const unknownStatuses = new Set<string>()
   const multiReservations = new Set<string>()
 
-  const mergeText = (first: string | null, second: string | null) => {
-    const values = [first, second].filter((value): value is string => Boolean(value))
-    return [...new Set(values)].join(' + ') || null
-  }
   const mergeStatuses = (first: string | null, second: string | null) => {
     const expand = (status: string | null) => status?.startsWith('multi__') ? status.slice(7).split('__') : [status ?? 'non_renseigne']
-    return `multi__${[...expand(first), ...expand(second)].sort().join('__')}`
+    const statuses = [...expand(first), ...expand(second)].filter(Boolean)
+    const distinct = [...new Set(statuses)]
+    return distinct.length === 1 ? distinct[0] : `multi__${statuses.sort().join('__')}`
   }
 
   raw.filter((row) => row.some((value) => value !== '' && value !== null && value !== undefined)).forEach((row) => {
@@ -225,14 +291,15 @@ function parseCleanWorkbook(buffer: ArrayBuffer): CleanImportResult {
       unique.set(reservationNumber, next)
       return
     }
+    if (!sameReservationIdentity(previous, next)) throw conflictingBasketError(reservationNumber, previous, next)
     multiReservations.add(reservationNumber)
     unique.set(reservationNumber, {
       reservation_number: reservationNumber,
       clean_status: mergeStatuses(previous.clean_status, next.clean_status),
       firstname: previous.firstname ?? next.firstname,
       lastname: previous.lastname ?? next.lastname,
-      accommodation_type: mergeText(previous.accommodation_type, next.accommodation_type),
-      pitch: mergeText(previous.pitch, next.pitch),
+      accommodation_type: mergeDistinctText(previous.accommodation_type, next.accommodation_type),
+      pitch: mergeDistinctText(previous.pitch, next.pitch),
     })
   })
 
